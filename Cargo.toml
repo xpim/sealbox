@@ -10,7 +10,6 @@ readme = "README.md"
 keywords = ["encryption", "archive", "argon2", "xchacha20", "gui"]
 categories = ["cryptography", "command-line-utilities", "filesystem"]
 repository = "https://github.com/xpim/sealbox"
-homepage = "https://github.com/xpim/sealbox"
 exclude = ["/.github"]
 
 [dependencies]
@@ -21,7 +20,7 @@ clap = { version = "4", features = ["derive"] }
 ctrlc = "3"
 eframe = "0.37"
 fs2 = "0.4"
-rand = "0.8"
+getrandom = "0.4"
 rfd = "0.18"
 rpassword = "7"
 tempfile = "3"
