@@ -10,29 +10,28 @@ readme = "README.md"
 keywords = ["encryption", "archive", "argon2", "xchacha20", "gui"]
 categories = ["cryptography", "command-line-utilities", "filesystem"]
 repository = "https://github.com/xpim/sealbox"
-homepage = "https://github.com/xpim/sealbox"
 exclude = ["/.github"]
 
 [dependencies]
 anyhow = "1"
-argon2 = "0.5"
+argon2 = "0.6"
 chacha20poly1305 = { version = "0.10", features = ["stream"] }
 clap = { version = "4", features = ["derive"] }
 ctrlc = "3"
 eframe = "0.37"
 fs2 = "0.4"
-rand = "0.8"
+getrandom = "0.4"
 rfd = "0.18"
 rpassword = "7"
 tempfile = "3"
 unicode-normalization = "0.1"
 walkdir = "2"
 zeroize = "1"
-zstd = { version = "0.13", features = ["zstdmt"] }
+zstd = { version = "0.14", features = ["zstdmt"] }
 zxcvbn = "3.1.1"
 
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
 
 [[bin]]
 name = "sealbox"
