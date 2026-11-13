@@ -9,7 +9,7 @@ use eframe::egui::{self, Color32, RichText};
 use zeroize::Zeroizing;
 
 use crate::archive::{self, Entry, EntryKind, Progress, Summary};
-use crate::crypto::{self, KdfParams};
+use crate::crypto::VaultParams;
 use crate::{MIN_PASSWORD_LEN, human_size};
 
 pub fn run(open_vault: Option<PathBuf>) -> Result<()> {
@@ -176,8 +176,14 @@ impl App {
         self.confirm = Zeroizing::new(String::new());
         self.start(ctx, "Encrypting…", true, move |p| {
             // The save dialog already asked about replacing an existing file.
-            let r =
-                archive::create_vault(&inputs, &out, pw.as_bytes(), KdfParams::default(), true, p);
+            let r = archive::create_vault(
+                &inputs,
+                &out,
+                pw.as_bytes(),
+                &VaultParams::default(),
+                true,
+                p,
+            );
             JobDone::Created(r, out)
         });
     }
@@ -194,7 +200,14 @@ impl App {
         let (path, pw, overwrite) = (v.path.clone(), v.password.clone(), self.overwrite);
         self.start(ctx, "Decrypting…", true, move |p| {
             JobDone::Extracted(
-                archive::extract_vault(&path, pw.as_bytes(), &dest, overwrite, p),
+                archive::extract_vault(
+                    &path,
+                    pw.as_bytes(),
+                    &VaultParams::default(),
+                    &dest,
+                    overwrite,
+                    p,
+                ),
                 dest,
             )
         });
@@ -263,7 +276,7 @@ impl App {
         }
         // Dropping a single .vault file opens it; anything else goes into
         // the container.
-        if dropped.len() == 1 && crypto::looks_like_vault(&dropped[0]) {
+        if dropped.len() == 1 && crate::is_vault_path(&dropped[0]) {
             self.ask_unlock(dropped[0].clone());
         } else {
             self.vault = None;
@@ -526,7 +539,11 @@ impl App {
             let pw = prompt.password.clone();
             prompt.error = None;
             self.start(ctx, "Unlocking…", false, move |_| {
-                JobDone::Opened(archive::list_vault(&path, pw.as_bytes()), path, pw)
+                JobDone::Opened(
+                    archive::list_vault(&path, pw.as_bytes(), &VaultParams::default()),
+                    path,
+                    pw,
+                )
             });
         }
     }

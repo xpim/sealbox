@@ -9,6 +9,14 @@ pub mod gui;
 /// Minimum password length accepted when creating a new vault.
 pub const MIN_PASSWORD_LEN: usize = 8;
 
+/// Is this an existing file with a `.vault` extension? Vault files contain
+/// no recognisable signature, so the extension is the only way to spot them.
+pub fn is_vault_path(p: &std::path::Path) -> bool {
+    p.is_file()
+        && p.extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("vault"))
+}
+
 pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut v = bytes as f64;

@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 use zeroize::Zeroizing;
 
 use crate::archive::{self, EntryKind, Progress, Summary};
-use crate::crypto::KdfParams;
+use crate::crypto::VaultParams;
 use crate::{MIN_PASSWORD_LEN, human_size};
 
 #[derive(Parser)]
@@ -154,7 +154,7 @@ pub fn run(cmd: Cmd) -> Result<()> {
                     &inputs,
                     &output,
                     pw.as_bytes(),
-                    KdfParams::default(),
+                    &VaultParams::default(),
                     force,
                     p,
                 )
@@ -170,7 +170,14 @@ pub fn run(cmd: Cmd) -> Result<()> {
         } => {
             let pw = get_password(password_stdin, false)?;
             let s = with_progress("Decrypting", |p| {
-                archive::extract_vault(&vault, pw.as_bytes(), &output, overwrite, p)
+                archive::extract_vault(
+                    &vault,
+                    pw.as_bytes(),
+                    &VaultParams::default(),
+                    &output,
+                    overwrite,
+                    p,
+                )
             })?;
             print_summary("Extracted", &s);
             println!("Into {}", output.display());
@@ -180,7 +187,7 @@ pub fn run(cmd: Cmd) -> Result<()> {
             password_stdin,
         } => {
             let pw = get_password(password_stdin, false)?;
-            let entries = archive::list_vault(&vault, pw.as_bytes())?;
+            let entries = archive::list_vault(&vault, pw.as_bytes(), &VaultParams::default())?;
             let (mut files, mut total) = (0, 0);
             for e in &entries {
                 match e.kind {

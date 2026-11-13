@@ -49,11 +49,14 @@ variables can be visible to other processes of the same user.
 | Encryption | **XChaCha20-Poly1305** AEAD in the **STREAM** construction, 1 MiB chunks, random nonce per vault |
 | Integrity | Every chunk is authenticated. Reordering, truncating, appending or flipping any bit, header included, is detected |
 | Metadata | File names, folder structure, sizes and counts live **inside** the encrypted payload. Total size is padded (Padmé) so the vault size reveals little |
+| Anonymity | No magic number, version or parameter block: every byte is random salt/nonce or ciphertext, so the file doesn't reveal which program made it |
 | Implementation | Audited RustCrypto crates (`argon2`, `chacha20poly1305`), no custom crypto primitives |
 
-Someone who has a `.vault` file but not the password sees only random-looking
-bytes plus the public header (format version, KDF cost parameters, salt and
-nonce). With the password they can't get the data back except by guessing it,
+Someone who has a `.vault` file but not the password sees only random
+bytes: nothing in the file identifies it as a vault or names this program.
+The `.vault` file name extension is the only hint, and you can rename the file
+freely. The GUI and the `vault some.vault` shortcut use the extension to
+recognise vaults, but `vault list`/`extract` accept any file name. With the password they can't get the data back except by guessing it,
 and Argon2id makes each guess expensive. **Use a strong passphrase:** that is
 the one thing the encryption cannot fix for you. There is no recovery if the
 password is lost.
@@ -67,11 +70,13 @@ file and moved into place only when complete.
 ### File format (v1)
 
 ```
-"THEVAULT" | u16 version | u8 kdf=1 | u32 m_cost_kib | u32 t_cost | u32 p_cost
-| salt[32] | nonce_prefix[19] | u32 chunk_size | STREAM ciphertext chunks...
+salt[32] | nonce_prefix[19] | STREAM ciphertext chunks...
 ```
 
-The decrypted payload is an index (paths, sizes, mtimes, permissions), then
+There is no header beyond the random salt and nonce. The format parameters
+(Argon2id 256 MiB / 3 passes / 4 lanes, 1 MiB chunks) are fixed constants of
+v1, not stored in the file. A future format version would be detected by trial
+decryption rather than by a version field. The decrypted payload is an index (paths, sizes, mtimes, permissions), then
 the file data, then padding. See `src/crypto.rs` and `src/archive.rs`.
 
 ## Tests

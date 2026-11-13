@@ -29,7 +29,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow, bail};
 use walkdir::WalkDir;
 
-use crate::crypto::{DecryptReader, EncryptWriter, KdfParams};
+use crate::crypto::{DecryptReader, EncryptWriter, VaultParams};
 
 const INDEX_MAGIC: &[u8; 8] = b"TVIDX001";
 const KIND_DIR: u8 = 1;
@@ -286,7 +286,7 @@ pub fn create_vault(
     inputs: &[PathBuf],
     output: &Path,
     password: &[u8],
-    kdf: KdfParams,
+    params: &VaultParams,
     overwrite: bool,
     progress: &Progress,
 ) -> Result<Summary> {
@@ -320,7 +320,7 @@ pub fn create_vault(
         .tempfile_in(dir)
         .with_context(|| format!("cannot write in {}", dir.display()))?;
     let file = tmp.as_file().try_clone()?;
-    let mut w = EncryptWriter::new(BufWriter::new(file), password, kdf)?;
+    let mut w = EncryptWriter::new(BufWriter::new(file), password, params)?;
     w.write_all(&index)?;
 
     for src in &sources {
@@ -424,14 +424,18 @@ fn read_index<R: Read>(r: &mut R) -> Result<Vec<Entry>> {
     Ok(entries)
 }
 
-fn open_vault(vault: &Path, password: &[u8]) -> Result<DecryptReader<BufReader<File>>> {
+fn open_vault(
+    vault: &Path,
+    password: &[u8],
+    params: &VaultParams,
+) -> Result<DecryptReader<BufReader<File>>> {
     let f = File::open(vault).with_context(|| format!("cannot open {}", vault.display()))?;
-    DecryptReader::new(BufReader::new(f), password)
+    DecryptReader::new(BufReader::new(f), password, params)
 }
 
 /// Decrypt only the index of a vault and return its entries.
-pub fn list_vault(vault: &Path, password: &[u8]) -> Result<Vec<Entry>> {
-    let mut r = open_vault(vault, password)?;
+pub fn list_vault(vault: &Path, password: &[u8], params: &VaultParams) -> Result<Vec<Entry>> {
+    let mut r = open_vault(vault, password, params)?;
     read_index(&mut r)
 }
 
@@ -479,11 +483,12 @@ fn to_systime(secs: i64) -> Option<SystemTime> {
 pub fn extract_vault(
     vault: &Path,
     password: &[u8],
+    params: &VaultParams,
     dest: &Path,
     overwrite: bool,
     progress: &Progress,
 ) -> Result<Summary> {
-    let mut r = open_vault(vault, password)?;
+    let mut r = open_vault(vault, password, params)?;
     let entries = read_index(&mut r)?;
 
     // Check for conflicts before touching the disk.
@@ -579,10 +584,13 @@ pub fn extract_vault(
 mod tests {
     use super::*;
 
-    const FAST: KdfParams = KdfParams {
-        m_cost_kib: 64,
-        t_cost: 1,
-        p_cost: 1,
+    const FAST: VaultParams = VaultParams {
+        kdf: crate::crypto::KdfParams {
+            m_cost_kib: 64,
+            t_cost: 1,
+            p_cost: 1,
+        },
+        chunk_size: 64 * 1024,
     };
 
     #[test]
@@ -629,7 +637,7 @@ mod tests {
 
         let vault = tmp.path().join("out.vault");
         let p = Progress::default();
-        let s = create_vault(&[src.clone(), single], &vault, b"pw", FAST, false, &p).unwrap();
+        let s = create_vault(&[src.clone(), single], &vault, b"pw", &FAST, false, &p).unwrap();
         assert_eq!(s.files, 3);
         assert_eq!(p.fraction(), 1.0);
 
@@ -637,27 +645,27 @@ mod tests {
         assert!(!raw.windows(5).any(|w| w == b"a.txt"), "file name leaked");
         assert!(!raw.windows(5).any(|w| w == b"hello"), "content leaked");
 
-        let names: Vec<String> = list_vault(&vault, b"pw")
+        let names: Vec<String> = list_vault(&vault, b"pw", &FAST)
             .unwrap()
             .into_iter()
             .map(|e| e.path)
             .collect();
         assert!(names.contains(&"src/docs/empty".to_string()));
         assert!(names.contains(&"note.md".to_string()));
-        assert!(list_vault(&vault, b"wrong").is_err());
+        assert!(list_vault(&vault, b"wrong", &FAST).is_err());
 
         let out = tmp.path().join("out");
-        extract_vault(&vault, b"pw", &out, false, &p).unwrap();
+        extract_vault(&vault, b"pw", &FAST, &out, false, &p).unwrap();
         assert_eq!(fs::read(out.join("src/docs/a.txt")).unwrap(), b"hello");
         assert_eq!(fs::read(out.join("src/big.bin")).unwrap(), big);
         assert_eq!(fs::read(out.join("note.md")).unwrap(), b"# note");
         assert!(out.join("src/docs/empty").is_dir());
 
         // Second extract refuses to clobber, then works with overwrite.
-        assert!(extract_vault(&vault, b"pw", &out, false, &p).is_err());
-        extract_vault(&vault, b"pw", &out, true, &p).unwrap();
+        assert!(extract_vault(&vault, b"pw", &FAST, &out, false, &p).is_err());
+        extract_vault(&vault, b"pw", &FAST, &out, true, &p).unwrap();
         // Refuse to overwrite the vault itself without the flag.
-        assert!(create_vault(std::slice::from_ref(&out), &vault, b"pw", FAST, false, &p).is_err());
+        assert!(create_vault(std::slice::from_ref(&out), &vault, b"pw", &FAST, false, &p).is_err());
     }
 
     #[test]
@@ -668,14 +676,14 @@ mod tests {
         fs::write(src.join("a"), vec![1u8; 10]).unwrap();
         fs::write(src.join("b"), vec![2u8; 3_000_000]).unwrap();
         let vault = tmp.path().join("v.vault");
-        create_vault(&[src], &vault, b"pw", FAST, false, &Progress::default()).unwrap();
+        create_vault(&[src], &vault, b"pw", &FAST, false, &Progress::default()).unwrap();
         // Corrupt the end of the file: the start decrypts, the end does not.
         let mut raw = fs::read(&vault).unwrap();
         let n = raw.len();
         raw[n - 5] ^= 0xff;
         fs::write(&vault, raw).unwrap();
         let out = tmp.path().join("out");
-        assert!(extract_vault(&vault, b"pw", &out, false, &Progress::default()).is_err());
+        assert!(extract_vault(&vault, b"pw", &FAST, &out, false, &Progress::default()).is_err());
         assert_eq!(
             fs::read_dir(&out).unwrap().count(),
             0,
@@ -691,14 +699,14 @@ mod tests {
         fs::create_dir(&src).unwrap();
         fs::write(src.join("f"), b"payload").unwrap();
         let vault = tmp.path().join("v.vault");
-        create_vault(&[src], &vault, b"pw", FAST, false, &Progress::default()).unwrap();
+        create_vault(&[src], &vault, b"pw", &FAST, false, &Progress::default()).unwrap();
 
         let out = tmp.path().join("out");
         let elsewhere = tmp.path().join("elsewhere");
         fs::create_dir_all(&out).unwrap();
         fs::create_dir_all(&elsewhere).unwrap();
         std::os::unix::fs::symlink(&elsewhere, out.join("d")).unwrap();
-        assert!(extract_vault(&vault, b"pw", &out, true, &Progress::default()).is_err());
+        assert!(extract_vault(&vault, b"pw", &FAST, &out, true, &Progress::default()).is_err());
         assert!(!elsewhere.join("f").exists());
     }
 }

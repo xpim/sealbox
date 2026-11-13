@@ -10,9 +10,7 @@ fn main() -> ExitCode {
     // .vault file associated with the app), opens the GUI.
     let gui_target = match args.len() {
         1 => Some(None),
-        2 if the_vault::crypto::looks_like_vault(args[1].as_ref()) => {
-            Some(Some(args[1].clone().into()))
-        }
+        2 if the_vault::is_vault_path(args[1].as_ref()) => Some(Some(args[1].clone().into())),
         _ => None,
     };
     let result = match gui_target {

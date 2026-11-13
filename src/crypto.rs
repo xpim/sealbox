@@ -1,28 +1,29 @@
 //! Encrypted container layer of the `.vault` format.
 //!
-//! On-disk layout (all integers little-endian):
+//! On-disk layout:
 //!
 //! ```text
 //! offset  size  field
-//! 0       8     magic  "THEVAULT"
-//! 8       2     format version (1)
-//! 10      1     KDF id (1 = Argon2id v1.3)
-//! 11      4     Argon2 memory cost in KiB
-//! 15      4     Argon2 time cost (iterations)
-//! 19      4     Argon2 parallelism
-//! 23      32    random salt
-//! 55      19    random STREAM nonce prefix
-//! 74      4     plaintext chunk size
-//! 78      ...   ciphertext chunks
+//! 0       32    random salt
+//! 32      19    random STREAM nonce prefix
+//! 51      ...   ciphertext chunks
 //! ```
+//!
+//! There is deliberately no magic number, version field or parameter block.
+//! Every byte of a vault is either random (salt, nonce) or ciphertext, so the
+//! file looks like uniformly random data and does not identify the program
+//! that wrote it. The cost of this is that the format parameters
+//! ([`VaultParams::default`]) are fixed constants of format v1. A future
+//! format would be recognised by trial decryption (try each known parameter
+//! set until the first chunk authenticates), not by a header field.
 //!
 //! The key is derived from the password with Argon2id. The payload is
 //! encrypted with XChaCha20-Poly1305 in the STREAM construction (Hoang,
 //! Reyhanitabar, Rogaway, Vizár 2015). Every chunk is authenticated and
 //! carries its position, plus a flag for the final chunk, in its nonce. So
-//! reordering, dropping, truncating or appending chunks is detected. The whole
-//! header is bound to every chunk as associated data, so tampering with the
-//! header is detected too.
+//! reordering, dropping, truncating or appending chunks is detected. The
+//! header is bound to every chunk as associated data, so tampering with it is
+//! detected too.
 //!
 //! Nothing about the contents is stored in plaintext. File names, sizes,
 //! counts and data all live inside the encrypted payload.
@@ -38,21 +39,10 @@ use rand::RngCore;
 use rand::rngs::OsRng;
 use zeroize::{Zeroize, Zeroizing};
 
-pub const MAGIC: &[u8; 8] = b"THEVAULT";
-pub const FORMAT_VERSION: u16 = 1;
-const KDF_ARGON2ID: u8 = 1;
-pub const HEADER_LEN: usize = 78;
 const SALT_LEN: usize = 32;
 const NONCE_LEN: usize = 19; // 24-byte XChaCha nonce minus 5 bytes STREAM counter/flag
+pub const HEADER_LEN: usize = SALT_LEN + NONCE_LEN;
 const TAG_LEN: usize = 16;
-pub const DEFAULT_CHUNK_SIZE: u32 = 1024 * 1024;
-
-/// Upper bounds accepted when *reading* a header, so that a malicious file
-/// cannot make us allocate absurd amounts of memory or spin forever.
-const MAX_M_COST_KIB: u32 = 4 * 1024 * 1024; // 4 GiB
-const MAX_T_COST: u32 = 64;
-const MAX_P_COST: u32 = 64;
-const MAX_CHUNK_SIZE: u32 = 64 * 1024 * 1024;
 
 /// Argon2id cost parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,83 +52,38 @@ pub struct KdfParams {
     pub p_cost: u32,
 }
 
-impl Default for KdfParams {
-    /// 256 MiB, 3 passes, 4 lanes. Takes roughly half a second to a second on a
-    /// modern machine, which makes guessing passwords offline very expensive.
+/// Parameters needed to read or write a vault. They are not stored in the
+/// file, so writer and reader must agree on them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VaultParams {
+    pub kdf: KdfParams,
+    pub chunk_size: u32,
+}
+
+impl Default for VaultParams {
+    /// Format v1: Argon2id with 256 MiB, 3 passes, 4 lanes (roughly half a
+    /// second to a second on a modern machine, which makes guessing passwords
+    /// offline very expensive), and 1 MiB chunks.
+    ///
+    /// Changing any of these makes existing vaults unreadable. Only change
+    /// them together with a fallback that also tries the old values.
     fn default() -> Self {
         Self {
-            m_cost_kib: 256 * 1024,
-            t_cost: 3,
-            p_cost: 4,
+            kdf: KdfParams {
+                m_cost_kib: 256 * 1024,
+                t_cost: 3,
+                p_cost: 4,
+            },
+            chunk_size: 1024 * 1024,
         }
     }
 }
 
-#[derive(Clone, Debug)]
-struct Header {
-    kdf: KdfParams,
-    salt: [u8; SALT_LEN],
-    nonce: [u8; NONCE_LEN],
-    chunk_size: u32,
-}
-
-impl Header {
-    fn to_bytes(&self) -> [u8; HEADER_LEN] {
-        let mut b = [0u8; HEADER_LEN];
-        b[0..8].copy_from_slice(MAGIC);
-        b[8..10].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
-        b[10] = KDF_ARGON2ID;
-        b[11..15].copy_from_slice(&self.kdf.m_cost_kib.to_le_bytes());
-        b[15..19].copy_from_slice(&self.kdf.t_cost.to_le_bytes());
-        b[19..23].copy_from_slice(&self.kdf.p_cost.to_le_bytes());
-        b[23..55].copy_from_slice(&self.salt);
-        b[55..74].copy_from_slice(&self.nonce);
-        b[74..78].copy_from_slice(&self.chunk_size.to_le_bytes());
-        b
-    }
-
-    fn from_bytes(b: &[u8; HEADER_LEN]) -> Result<Self> {
-        if &b[0..8] != MAGIC {
-            bail!("not a .vault file (bad magic bytes)");
-        }
-        let version = u16::from_le_bytes([b[8], b[9]]);
-        if version != FORMAT_VERSION {
-            bail!(
-                "unsupported vault format version {version} (this build supports {FORMAT_VERSION})"
-            );
-        }
-        if b[10] != KDF_ARGON2ID {
-            bail!("unsupported key derivation function id {}", b[10]);
-        }
-        let u32_at = |i: usize| u32::from_le_bytes(b[i..i + 4].try_into().unwrap());
-        let kdf = KdfParams {
-            m_cost_kib: u32_at(11),
-            t_cost: u32_at(15),
-            p_cost: u32_at(19),
-        };
-        let chunk_size = u32_at(74);
-        if kdf.m_cost_kib > MAX_M_COST_KIB
-            || kdf.t_cost == 0
-            || kdf.t_cost > MAX_T_COST
-            || kdf.p_cost == 0
-            || kdf.p_cost > MAX_P_COST
-        {
-            bail!("vault header has out-of-range key derivation parameters");
-        }
-        if chunk_size == 0 || chunk_size > MAX_CHUNK_SIZE {
-            bail!("vault header has an out-of-range chunk size");
-        }
-        let mut salt = [0u8; SALT_LEN];
-        salt.copy_from_slice(&b[23..55]);
-        let mut nonce = [0u8; NONCE_LEN];
-        nonce.copy_from_slice(&b[55..74]);
-        Ok(Self {
-            kdf,
-            salt,
-            nonce,
-            chunk_size,
-        })
-    }
+fn header_bytes(salt: &[u8; SALT_LEN], nonce: &[u8; NONCE_LEN]) -> [u8; HEADER_LEN] {
+    let mut b = [0u8; HEADER_LEN];
+    b[..SALT_LEN].copy_from_slice(salt);
+    b[SALT_LEN..].copy_from_slice(nonce);
+    b
 }
 
 fn derive_key(password: &[u8], salt: &[u8], kdf: KdfParams) -> Result<Zeroizing<[u8; 32]>> {
@@ -181,35 +126,23 @@ pub struct EncryptWriter<W: Write> {
 }
 
 impl<W: Write> EncryptWriter<W> {
-    pub fn new(inner: W, password: &[u8], kdf: KdfParams) -> Result<Self> {
-        Self::with_chunk_size(inner, password, kdf, DEFAULT_CHUNK_SIZE)
-    }
-
-    pub fn with_chunk_size(
-        mut inner: W,
-        password: &[u8],
-        kdf: KdfParams,
-        chunk_size: u32,
-    ) -> Result<Self> {
-        let mut header = Header {
-            kdf,
-            salt: [0; SALT_LEN],
-            nonce: [0; NONCE_LEN],
-            chunk_size,
-        };
-        OsRng.fill_bytes(&mut header.salt);
-        OsRng.fill_bytes(&mut header.nonce);
-        let key = derive_key(password, &header.salt, kdf)?;
+    pub fn new(mut inner: W, password: &[u8], params: &VaultParams) -> Result<Self> {
+        let mut salt = [0u8; SALT_LEN];
+        let mut nonce = [0u8; NONCE_LEN];
+        OsRng.fill_bytes(&mut salt);
+        OsRng.fill_bytes(&mut nonce);
+        let key = derive_key(password, &salt, params.kdf)?;
         let cipher = XChaCha20Poly1305::new(Key::from_slice(key.as_ref()));
-        let enc = EncryptorBE32::from_aead(cipher, header.nonce.as_ref().into());
-        let aad = header.to_bytes();
+        let enc = EncryptorBE32::from_aead(cipher, nonce.as_ref().into());
+        let aad = header_bytes(&salt, &nonce);
         inner.write_all(&aad).context("writing vault header")?;
+        let chunk_size = params.chunk_size as usize;
         Ok(Self {
             inner,
             enc: Some(enc),
             aad,
-            buf: Zeroizing::new(Vec::with_capacity(chunk_size as usize + 1)),
-            chunk_size: chunk_size as usize,
+            buf: Zeroizing::new(Vec::with_capacity(chunk_size + 1)),
+            chunk_size,
         })
     }
 
@@ -284,21 +217,21 @@ pub const AUTH_FAILED: &str =
     "wrong password, or the vault file is corrupted or has been tampered with";
 
 impl<R: Read> DecryptReader<R> {
-    pub fn new(mut inner: R, password: &[u8]) -> Result<Self> {
+    pub fn new(mut inner: R, password: &[u8], params: &VaultParams) -> Result<Self> {
         let mut hb = [0u8; HEADER_LEN];
         let n = read_full(&mut inner, &mut hb).context("reading vault header")?;
         if n < HEADER_LEN {
-            bail!("not a .vault file (file too short)");
+            bail!("not a vault file (file too short)");
         }
-        let header = Header::from_bytes(&hb)?;
-        let key = derive_key(password, &header.salt, header.kdf)?;
+        let (salt, nonce) = hb.split_at(SALT_LEN);
+        let key = derive_key(password, salt, params.kdf)?;
         let cipher = XChaCha20Poly1305::new(Key::from_slice(key.as_ref()));
-        let dec = DecryptorBE32::from_aead(cipher, header.nonce.as_ref().into());
+        let dec = DecryptorBE32::from_aead(cipher, nonce.into());
         let mut me = Self {
             inner,
             dec: Some(dec),
             aad: hb,
-            ct_buf: vec![0u8; header.chunk_size as usize + TAG_LEN],
+            ct_buf: vec![0u8; params.chunk_size as usize + TAG_LEN],
             lookahead: None,
             plain: Zeroizing::new(Vec::new()),
             pos: 0,
@@ -363,34 +296,28 @@ impl<R: Read> Read for DecryptReader<R> {
     }
 }
 
-/// Does this file start with the vault magic bytes? Used to recognise vaults
-/// dropped onto the GUI.
-pub fn looks_like_vault(path: &std::path::Path) -> bool {
-    let mut magic = [0u8; 8];
-    std::fs::File::open(path)
-        .and_then(|mut f| f.read_exact(&mut magic))
-        .map(|_| &magic == MAGIC)
-        .unwrap_or(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const FAST: KdfParams = KdfParams {
-        m_cost_kib: 64,
-        t_cost: 1,
-        p_cost: 1,
+    /// Cheap KDF and tiny chunks so tests are fast and cross chunk borders.
+    const FAST: VaultParams = VaultParams {
+        kdf: KdfParams {
+            m_cost_kib: 64,
+            t_cost: 1,
+            p_cost: 1,
+        },
+        chunk_size: 16,
     };
 
-    fn roundtrip(data: &[u8], chunk: u32) -> Vec<u8> {
-        let mut w = EncryptWriter::with_chunk_size(Vec::new(), b"pw", FAST, chunk).unwrap();
+    fn roundtrip(data: &[u8]) -> Vec<u8> {
+        let mut w = EncryptWriter::new(Vec::new(), b"pw", &FAST).unwrap();
         w.write_all(data).unwrap();
         w.finish().unwrap()
     }
 
     fn decrypt(ct: &[u8], pw: &[u8]) -> Result<Vec<u8>> {
-        let mut r = DecryptReader::new(ct, pw)?;
+        let mut r = DecryptReader::new(ct, pw, &FAST)?;
         let mut out = Vec::new();
         r.read_to_end(&mut out)?;
         Ok(out)
@@ -400,21 +327,21 @@ mod tests {
     fn roundtrips_various_sizes() {
         for len in [0usize, 1, 15, 16, 17, 31, 32, 33, 100, 1000] {
             let data: Vec<u8> = (0..len).map(|i| (i * 7) as u8).collect();
-            let ct = roundtrip(&data, 16);
+            let ct = roundtrip(&data);
             assert_eq!(decrypt(&ct, b"pw").unwrap(), data, "len {len}");
         }
     }
 
     #[test]
     fn wrong_password_fails() {
-        let ct = roundtrip(b"secret", 16);
+        let ct = roundtrip(b"secret");
         assert!(decrypt(&ct, b"nope").is_err());
     }
 
     #[test]
     fn truncation_detected() {
         let data = vec![42u8; 100];
-        let ct = roundtrip(&data, 16);
+        let ct = roundtrip(&data);
         // Cut off at chunk boundaries and in the middle of chunks.
         for cut in [
             HEADER_LEN + 32,
@@ -428,20 +355,15 @@ mod tests {
 
     #[test]
     fn appended_data_detected() {
-        let mut ct = roundtrip(&[1u8; 40], 16);
+        let mut ct = roundtrip(&[1u8; 40]);
         ct.extend_from_slice(&[0u8; 32]);
         assert!(decrypt(&ct, b"pw").is_err());
     }
 
     #[test]
     fn any_bit_flip_detected() {
-        let ct = roundtrip(&[9u8; 50], 16);
+        let ct = roundtrip(&[9u8; 50]);
         for i in 0..ct.len() {
-            // Flipping a bit in the memory-cost field would just make the test
-            // allocate gigabytes before failing; skip those four bytes.
-            if (11..15).contains(&i) {
-                continue;
-            }
             let mut bad = ct.clone();
             bad[i] ^= 0x01;
             assert!(
@@ -452,7 +374,16 @@ mod tests {
     }
 
     #[test]
+    fn no_identifying_bytes() {
+        // Two vaults of the same content share no fixed prefix: there is no
+        // magic number, version or parameter block anywhere.
+        let (a, b) = (roundtrip(b"hello"), roundtrip(b"hello"));
+        let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+        assert!(common < 4, "{common} identical leading bytes");
+    }
+
+    #[test]
     fn same_input_gives_different_ciphertext() {
-        assert_ne!(roundtrip(b"hello", 16), roundtrip(b"hello", 16));
+        assert_ne!(roundtrip(b"hello"), roundtrip(b"hello"));
     }
 }
