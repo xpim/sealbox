@@ -31,7 +31,7 @@ zstd = { version = "0.14", features = ["zstdmt"] }
 zxcvbn = "3.1.1"
 
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
 
 [[bin]]
 name = "sealbox"
