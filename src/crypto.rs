@@ -39,8 +39,6 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::stream::{DecryptorBE32, EncryptorBE32};
 use chacha20poly1305::aead::{KeyInit, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305};
-use rand::RngCore;
-use rand::rngs::OsRng;
 use zeroize::{Zeroize, Zeroizing};
 
 pub const SALT_LEN: usize = 32;
@@ -150,8 +148,10 @@ impl<W: Write> EncryptWriter<W> {
     pub fn new(inner: W, password: &[u8], params: &SealParams) -> Result<Self> {
         let mut salt = [0u8; SALT_LEN];
         let mut nonce = [0u8; NONCE_LEN];
-        OsRng.fill_bytes(&mut salt);
-        OsRng.fill_bytes(&mut nonce);
+        // Straight from the operating system's secure random generator.
+        getrandom::fill(&mut salt)
+            .and_then(|()| getrandom::fill(&mut nonce))
+            .map_err(|e| anyhow::anyhow!("cannot get secure random bytes: {e}"))?;
         Self::with_salt_and_nonce(inner, password, params, salt, nonce)
     }
 
