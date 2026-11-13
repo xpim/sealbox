@@ -17,6 +17,7 @@ rpassword = "7"
 tempfile = "3"
 walkdir = "2"
 zeroize = "1"
+zstd = { version = "0.13", features = ["zstdmt"] }
 
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Console"] }

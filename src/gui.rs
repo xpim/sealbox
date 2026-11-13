@@ -181,6 +181,7 @@ impl App {
                 &out,
                 pw.as_bytes(),
                 &VaultParams::default(),
+                archive::DEFAULT_COMPRESSION_LEVEL,
                 true,
                 p,
             );
@@ -220,10 +221,12 @@ impl App {
         match done {
             JobDone::Created(Ok(s), out) => {
                 let mut msg = format!(
-                    "Saved {} file(s), {} to {}",
+                    "Saved {} file(s), {} to {} ({}{})",
                     s.files,
                     human_size(s.bytes),
-                    out.display()
+                    out.display(),
+                    human_size(s.vault_size),
+                    crate::cli::ratio(s.bytes, s.vault_size)
                 );
                 if !s.warnings.is_empty() {
                     msg += &format!(
@@ -601,7 +604,7 @@ impl eframe::App for App {
                     }
                     None => {
                         ui.label(
-                            RichText::new("Encrypted with Argon2id + XChaCha20-Poly1305").weak(),
+                            RichText::new("Compressed with zstd, encrypted with Argon2id + XChaCha20-Poly1305").weak(),
                         );
                     }
                 }

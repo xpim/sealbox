@@ -123,6 +123,7 @@ pub struct EncryptWriter<W: Write> {
     aad: [u8; HEADER_LEN],
     buf: Zeroizing<Vec<u8>>,
     chunk_size: usize,
+    written: u64,
 }
 
 impl<W: Write> EncryptWriter<W> {
@@ -143,6 +144,7 @@ impl<W: Write> EncryptWriter<W> {
             aad,
             buf: Zeroizing::new(Vec::with_capacity(chunk_size + 1)),
             chunk_size,
+            written: 0,
         })
     }
 
@@ -161,6 +163,11 @@ impl<W: Write> EncryptWriter<W> {
             self.buf.drain(..self.chunk_size);
         }
         Ok(())
+    }
+
+    /// Number of plaintext bytes written so far.
+    pub fn plaintext_len(&self) -> u64 {
+        self.written
     }
 
     /// Seal the final chunk and return the inner writer.
@@ -183,6 +190,7 @@ impl<W: Write> EncryptWriter<W> {
 impl<W: Write> Write for EncryptWriter<W> {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         self.buf.extend_from_slice(data);
+        self.written += data.len() as u64;
         self.flush_full_chunks()?;
         Ok(data.len())
     }

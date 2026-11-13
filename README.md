@@ -7,7 +7,9 @@ CLI, from one self-contained binary.
 
 ## Build
 
-Install Rust from https://rustup.rs, then:
+Install Rust from https://rustup.rs. You also need a C compiler for the bundled
+zstd library; the standard Rust setup already provides one (MSVC Build Tools on
+Windows, Xcode Command Line Tools on macOS, gcc/clang on Linux). Then:
 
 ```sh
 cargo build --release
@@ -33,6 +35,7 @@ Run `vault` with no arguments (or double-click it).
 
 ```sh
 vault create -o backup.vault ~/Documents/taxes notes.txt   # asks for password twice
+vault create -l 19 -o small.vault ~/Documents             # max compression (1-19, default 3)
 vault list backup.vault
 vault extract backup.vault -o ./restored                  # --overwrite to replace files
 ```
@@ -46,9 +49,10 @@ variables can be visible to other processes of the same user.
 | Part | Choice |
 |---|---|
 | Key derivation | **Argon2id** (memory-hard), 256 MiB, 3 passes, 4 lanes, random 32-byte salt per vault |
+| Compression | **zstd** (level 3 by default), applied *before* encryption, since encrypted data does not compress |
 | Encryption | **XChaCha20-Poly1305** AEAD in the **STREAM** construction, 1 MiB chunks, random nonce per vault |
 | Integrity | Every chunk is authenticated. Reordering, truncating, appending or flipping any bit, header included, is detected |
-| Metadata | File names, folder structure, sizes and counts live **inside** the encrypted payload. Total size is padded (Padmé) so the vault size reveals little |
+| Metadata | File names, folder structure, sizes and counts live **inside** the encrypted payload. The compressed size is padded (Padmé) so the vault size reveals little |
 | Anonymity | No magic number, version or parameter block: every byte is random salt/nonce or ciphertext, so the file doesn't reveal which program made it |
 | Implementation | Audited RustCrypto crates (`argon2`, `chacha20poly1305`), no custom crypto primitives |
 
@@ -76,8 +80,10 @@ salt[32] | nonce_prefix[19] | STREAM ciphertext chunks...
 There is no header beyond the random salt and nonce. The format parameters
 (Argon2id 256 MiB / 3 passes / 4 lanes, 1 MiB chunks) are fixed constants of
 v1, not stored in the file. A future format version would be detected by trial
-decryption rather than by a version field. The decrypted payload is an index (paths, sizes, mtimes, permissions), then
-the file data, then padding. See `src/crypto.rs` and `src/archive.rs`.
+decryption rather than by a version field. The decrypted payload is a one-byte payload format marker (`1` = zstd), a
+zstd frame holding the index (paths, sizes, mtimes, permissions) followed by
+the file data, and then padding. The marker is encrypted, so it is invisible
+on disk. See `src/crypto.rs` and `src/archive.rs`.
 
 ## Tests
 

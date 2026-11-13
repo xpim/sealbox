@@ -39,6 +39,10 @@ pub enum Cmd {
         /// Overwrite the output file if it already exists
         #[arg(short, long)]
         force: bool,
+        /// Compression level: 1 (fastest) to 19 (smallest)
+        #[arg(short, long, default_value_t = archive::DEFAULT_COMPRESSION_LEVEL,
+              value_parser = clap::value_parser!(i32).range(1..=19))]
+        level: i32,
         /// Read the password from the first line of standard input
         #[arg(long)]
         password_stdin: bool,
@@ -122,6 +126,19 @@ fn with_progress<T>(label: &str, job: impl FnOnce(&Progress) -> T) -> T {
     out
 }
 
+/// ", 38% of original" style suffix, or nothing for empty input.
+pub fn ratio(original: u64, vault: u64) -> String {
+    if original == 0 {
+        String::new()
+    } else {
+        match vault as f64 * 100.0 / original as f64 {
+            p if p < 0.1 => ", <0.1% of original".to_string(),
+            p if p < 10.0 => format!(", {p:.1}% of original"),
+            p => format!(", {p:.0}% of original"),
+        }
+    }
+}
+
 fn print_summary(verb: &str, s: &Summary) {
     for w in &s.warnings {
         eprintln!("warning: {w}");
@@ -140,6 +157,7 @@ pub fn run(cmd: Cmd) -> Result<()> {
             mut output,
             inputs,
             force,
+            level,
             password_stdin,
         } => {
             if output
@@ -155,12 +173,18 @@ pub fn run(cmd: Cmd) -> Result<()> {
                     &output,
                     pw.as_bytes(),
                     &VaultParams::default(),
+                    level,
                     force,
                     p,
                 )
             })?;
             print_summary("Encrypted", &s);
-            println!("Vault written to {}", output.display());
+            println!(
+                "Vault written to {} ({}{})",
+                output.display(),
+                human_size(s.vault_size),
+                ratio(s.bytes, s.vault_size)
+            );
         }
         Cmd::Extract {
             vault,

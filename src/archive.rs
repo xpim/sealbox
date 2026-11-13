@@ -3,20 +3,28 @@
 //! The plaintext that goes through [`crate::crypto`] looks like this:
 //!
 //! ```text
-//! "TVIDX001"                       index magic
-//! u64 entry count
-//! per entry:
-//!   u8  kind (1 = directory, 2 = file)
-//!   u32 path length, then UTF-8 path ('/'-separated, relative)
-//!   u32 unix permission bits (0 = unknown)
-//!   i64 modification time, seconds since the Unix epoch
-//!   u64 size in bytes (0 for directories)
-//! file contents, concatenated in index order
+//! u8 payload format (1 = zstd-compressed archive)
+//! zstd frame containing:
+//!   "TVIDX001"                     index magic
+//!   u64 entry count
+//!   per entry:
+//!     u8  kind (1 = directory, 2 = file)
+//!     u32 path length, then UTF-8 path ('/'-separated, relative)
+//!     u32 unix permission bits (0 = unknown)
+//!     i64 modification time, seconds since the Unix epoch
+//!     u64 size in bytes (0 for directories)
+//!   file contents, concatenated in index order
 //! zero padding (Padmé) so the vault size reveals little about the content size
 //! ```
 //!
-//! The index comes first, so listing a vault only has to decrypt the start
-//! of it.
+//! Compression happens before encryption (encrypted data does not compress).
+//! The padding is applied to the *compressed* size, since that is what the
+//! vault's file size would otherwise reveal. The payload format byte is
+//! inside the encryption, so it is invisible on disk but leaves room for
+//! future formats.
+//!
+//! The index comes first, so listing a vault only has to decrypt and
+//! decompress the start of it.
 
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -36,6 +44,12 @@ const KIND_DIR: u8 = 1;
 const KIND_FILE: u8 = 2;
 const MAX_PATH_LEN: u32 = 32 * 1024;
 const MAX_ENTRIES: u64 = 50_000_000;
+/// Cap on the total size of all paths in the index. Compression lets a tiny
+/// malicious vault claim a huge index; this bounds the memory it can take.
+const MAX_INDEX_PATH_BYTES: u64 = 256 * 1024 * 1024;
+const PAYLOAD_ZSTD: u8 = 1;
+/// zstd level used when none is given (1 = fastest, 19 = smallest).
+pub const DEFAULT_COMPRESSION_LEVEL: i32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryKind {
@@ -89,6 +103,8 @@ pub struct Summary {
     pub files: u64,
     pub dirs: u64,
     pub bytes: u64,
+    /// Size of the vault file (only set when creating).
+    pub vault_size: u64,
     /// Non-fatal issues, e.g. skipped symlinks.
     pub warnings: Vec<String>,
 }
@@ -287,6 +303,7 @@ pub fn create_vault(
     output: &Path,
     password: &[u8],
     params: &VaultParams,
+    compression_level: i32,
     overwrite: bool,
     progress: &Progress,
 ) -> Result<Summary> {
@@ -306,8 +323,6 @@ pub fn create_vault(
     let entries: Vec<&Entry> = sources.iter().map(|s| &s.entry).collect();
     let index = encode_index(&entries);
     let data_len: u64 = entries.iter().map(|e| e.size).sum();
-    let plain_len = index.len() as u64 + data_len;
-    let padding = padme(plain_len) - plain_len;
     progress.total.store(data_len, Ordering::Relaxed);
     progress.done.store(0, Ordering::Relaxed);
 
@@ -321,6 +336,14 @@ pub fn create_vault(
         .with_context(|| format!("cannot write in {}", dir.display()))?;
     let file = tmp.as_file().try_clone()?;
     let mut w = EncryptWriter::new(BufWriter::new(file), password, params)?;
+    w.write_all(&[PAYLOAD_ZSTD])?;
+    let mut w = zstd::Encoder::new(w, compression_level)?;
+    // The AEAD already authenticates every byte; a zstd checksum adds nothing.
+    w.include_checksum(false)?;
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
+    if threads > 1 {
+        w.multithread(threads as u32)?;
+    }
     w.write_all(&index)?;
 
     for src in &sources {
@@ -346,7 +369,9 @@ pub fn create_vault(
             }
         }
     }
-    io::copy(&mut io::repeat(0).take(padding), &mut w)?;
+    let mut w = w.finish()?;
+    let len = w.plaintext_len();
+    io::copy(&mut io::repeat(0).take(padme(len) - len), &mut w)?;
     let file = w.finish()?.into_inner().map_err(|e| e.into_error())?;
     file.sync_all()?;
     drop(file);
@@ -358,6 +383,7 @@ pub fn create_vault(
     }
     .map_err(|e| e.error)
     .with_context(|| format!("cannot write {}", output.display()))?;
+    summary.vault_size = fs::metadata(output).map(|m| m.len()).unwrap_or(0);
     Ok(summary)
 }
 
@@ -393,6 +419,7 @@ fn read_index<R: Read>(r: &mut R) -> Result<Vec<Entry>> {
         return Err(bad());
     }
     let mut entries = Vec::new();
+    let mut path_bytes = 0u64;
     for _ in 0..count {
         let kind = match read_u8(r)? {
             KIND_DIR => EntryKind::Dir,
@@ -400,7 +427,8 @@ fn read_index<R: Read>(r: &mut R) -> Result<Vec<Entry>> {
             _ => return Err(bad()),
         };
         let len = read_u32(r)?;
-        if len > MAX_PATH_LEN {
+        path_bytes += len as u64;
+        if len > MAX_PATH_LEN || path_bytes > MAX_INDEX_PATH_BYTES {
             return Err(bad());
         }
         let mut p = vec![0u8; len as usize];
@@ -424,13 +452,30 @@ fn read_index<R: Read>(r: &mut R) -> Result<Vec<Entry>> {
     Ok(entries)
 }
 
-fn open_vault(
-    vault: &Path,
-    password: &[u8],
-    params: &VaultParams,
-) -> Result<DecryptReader<BufReader<File>>> {
+type Decrypted = BufReader<DecryptReader<BufReader<File>>>;
+type Payload = zstd::stream::read::Decoder<'static, Decrypted>;
+
+/// Decrypt the vault and return a reader over the decompressed archive.
+fn open_vault(vault: &Path, password: &[u8], params: &VaultParams) -> Result<Payload> {
     let f = File::open(vault).with_context(|| format!("cannot open {}", vault.display()))?;
-    DecryptReader::new(BufReader::new(f), password, params)
+    let mut r = DecryptReader::new(BufReader::new(f), password, params)?;
+    if read_u8(&mut r)? != PAYLOAD_ZSTD {
+        bail!("vault contents use an unsupported format (made by a newer version?)");
+    }
+    let z = zstd::stream::read::Decoder::with_buffer(BufReader::new(r))?.single_frame();
+    Ok(z)
+}
+
+/// Verify that the archive ended exactly where the index said it would,
+/// then read the padding through to the end of the encrypted stream. That
+/// authenticates the final chunk, proving the vault was not truncated.
+fn finish_payload(mut z: Payload) -> Result<()> {
+    let mut extra = [0u8; 1];
+    if z.read(&mut extra)? != 0 {
+        bail!("vault contents are malformed (unexpected trailing data)");
+    }
+    io::copy(&mut z.finish(), &mut io::sink())?;
+    Ok(())
 }
 
 /// Decrypt only the index of a vault and return its entries.
@@ -563,9 +608,7 @@ pub fn extract_vault(
                 }
             }
         }
-        // Read the padding through to the end: this authenticates the final
-        // chunk, proving the vault was not truncated or extended.
-        io::copy(&mut r, &mut io::sink())?;
+        finish_payload(r)?;
         Ok(summary)
     })();
 
@@ -592,6 +635,38 @@ mod tests {
         },
         chunk_size: 64 * 1024,
     };
+
+    /// Incompressible test data (xorshift), so vaults span many chunks.
+    fn pseudo_random(len: usize) -> Vec<u8> {
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn compresses_contents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("log.txt");
+        let text = "2026-11-13 INFO request handled in 12ms\n".repeat(100_000);
+        fs::write(&src, &text).unwrap();
+        let vault = tmp.path().join("v.vault");
+        let p = Progress::default();
+        let s = create_vault(&[src], &vault, b"pw", &FAST, 3, false, &p).unwrap();
+        assert!(
+            s.vault_size < text.len() as u64 / 20,
+            "vault {} bytes",
+            s.vault_size
+        );
+        let out = tmp.path().join("out");
+        extract_vault(&vault, b"pw", &FAST, &out, false, &p).unwrap();
+        assert_eq!(fs::read_to_string(out.join("log.txt")).unwrap(), text);
+    }
 
     #[test]
     fn padme_values() {
@@ -637,7 +712,7 @@ mod tests {
 
         let vault = tmp.path().join("out.vault");
         let p = Progress::default();
-        let s = create_vault(&[src.clone(), single], &vault, b"pw", &FAST, false, &p).unwrap();
+        let s = create_vault(&[src.clone(), single], &vault, b"pw", &FAST, 3, false, &p).unwrap();
         assert_eq!(s.files, 3);
         assert_eq!(p.fraction(), 1.0);
 
@@ -665,7 +740,18 @@ mod tests {
         assert!(extract_vault(&vault, b"pw", &FAST, &out, false, &p).is_err());
         extract_vault(&vault, b"pw", &FAST, &out, true, &p).unwrap();
         // Refuse to overwrite the vault itself without the flag.
-        assert!(create_vault(std::slice::from_ref(&out), &vault, b"pw", &FAST, false, &p).is_err());
+        assert!(
+            create_vault(
+                std::slice::from_ref(&out),
+                &vault,
+                b"pw",
+                &FAST,
+                3,
+                false,
+                &p
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -674,9 +760,9 @@ mod tests {
         let src = tmp.path().join("d");
         fs::create_dir(&src).unwrap();
         fs::write(src.join("a"), vec![1u8; 10]).unwrap();
-        fs::write(src.join("b"), vec![2u8; 3_000_000]).unwrap();
+        fs::write(src.join("b"), pseudo_random(3_000_000)).unwrap();
         let vault = tmp.path().join("v.vault");
-        create_vault(&[src], &vault, b"pw", &FAST, false, &Progress::default()).unwrap();
+        create_vault(&[src], &vault, b"pw", &FAST, 3, false, &Progress::default()).unwrap();
         // Corrupt the end of the file: the start decrypts, the end does not.
         let mut raw = fs::read(&vault).unwrap();
         let n = raw.len();
@@ -699,7 +785,7 @@ mod tests {
         fs::create_dir(&src).unwrap();
         fs::write(src.join("f"), b"payload").unwrap();
         let vault = tmp.path().join("v.vault");
-        create_vault(&[src], &vault, b"pw", &FAST, false, &Progress::default()).unwrap();
+        create_vault(&[src], &vault, b"pw", &FAST, 3, false, &Progress::default()).unwrap();
 
         let out = tmp.path().join("out");
         let elsewhere = tmp.path().join("elsewhere");
