@@ -14,6 +14,10 @@ Download the archive for your system from the
 archive contains both programs, this README, the license and the licenses of
 the bundled open-source components.
 
+The Linux build runs on any x86-64 distribution with glibc 2.28 or newer
+(Debian 10+, Ubuntu 20.04+, RHEL 8+, Fedora 29+). Windows builds are for
+x86-64, macOS builds for Apple Silicon and Intel.
+
 ### Verify the download
 
 Every release lists SHA-256 checksums (`SHA256SUMS.txt`) and has a build
