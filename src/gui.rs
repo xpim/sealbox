@@ -459,7 +459,8 @@ impl App {
             i.raw
                 .dropped_files
                 .iter()
-                .filter_map(|f| f.path.clone())
+                .map(|f| f.path().to_path_buf())
+                .filter(|p| !p.as_os_str().is_empty())
                 .collect()
         });
         if dropped.is_empty() {
@@ -521,7 +522,7 @@ impl App {
     fn container_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
 
-        egui::TopBottomPanel::bottom("save_panel").show_inside(ui, |ui| {
+        egui::Panel::bottom("save_panel").show(ui, |ui| {
             ui.add_space(6.0);
             let ready = !self.items.is_empty();
             egui::Grid::new("pw_grid")
@@ -585,7 +586,7 @@ impl App {
             ui.add_space(4.0);
         });
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("Container: {} item(s)", self.items.len())).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -660,7 +661,7 @@ impl App {
         let chosen = v.selected_count();
         let name = v.name();
 
-        egui::TopBottomPanel::bottom("unseal_panel").show_inside(ui, |ui| {
+        egui::Panel::bottom("unseal_panel").show(ui, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 let label = if chosen == 0 {
@@ -695,7 +696,7 @@ impl App {
             ui.add_space(4.0);
         });
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             let Some(v) = &mut self.opened else { return };
             ui.horizontal(|ui| {
                 ui.label(
@@ -849,7 +850,8 @@ fn display_name(p: &Path) -> String {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = &root.ctx().clone();
         // Closing the window during a job would kill it mid-write. Cancel it
         // instead, and close once it has cleaned up.
         if ctx.input(|i| i.viewport().close_requested())
@@ -871,13 +873,13 @@ impl eframe::App for App {
 
         let busy = self.job.is_some();
 
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
+        egui::Panel::top("top").show(root, |ui| {
             ui.add_space(4.0);
             ui.add_enabled_ui(!busy && self.unlock.is_none(), |ui| self.top_bar(ui));
             ui.add_space(2.0);
         });
 
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+        egui::Panel::bottom("status").show(root, |ui| {
             ui.add_space(4.0);
             if let Some(job) = &self.job {
                 if self.closing {
@@ -930,7 +932,7 @@ impl eframe::App for App {
             ui.add_space(2.0);
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(root, |ui| {
             ui.add_enabled_ui(!busy && self.unlock.is_none(), |ui| {
                 if self.opened.is_some() {
                     self.sealbox_view(ui, ctx);

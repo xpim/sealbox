@@ -11,10 +11,10 @@ argon2 = "0.5"
 chacha20poly1305 = { version = "0.10", features = ["stream"] }
 clap = { version = "4", features = ["derive"] }
 ctrlc = "3"
-eframe = "0.31"
+eframe = "0.37"
 fs2 = "0.4"
 rand = "0.8"
-rfd = "0.15"
+rfd = "0.18"
 rpassword = "7"
 tempfile = "3"
 unicode-normalization = "0.1"
