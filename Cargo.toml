@@ -9,8 +9,8 @@ license = "MIT"
 readme = "README.md"
 keywords = ["encryption", "archive", "argon2", "xchacha20", "gui"]
 categories = ["cryptography", "command-line-utilities", "filesystem"]
-# Add once the repository is public:
-# repository = "https://github.com/<you>/sealbox"
+repository = "https://github.com/xpim/sealbox"
+homepage = "https://github.com/xpim/sealbox"
 exclude = ["/.github"]
 
 [dependencies]

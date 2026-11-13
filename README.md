@@ -9,8 +9,8 @@ files back. It runs on Windows, Linux and macOS, with both a GUI and a CLI.
 
 ## Install
 
-Download the archive for your system from the **Releases** page of this
-repository, unpack it and run `sealbox-gui` (or `sealbox` for the CLI). Each
+Download the archive for your system from the
+[Releases page](https://github.com/xpim/sealbox/releases), unpack it and run `sealbox-gui` (or `sealbox` for the CLI). Each
 archive contains both programs, this README, the license and the licenses of
 the bundled open-source components.
 
@@ -21,7 +21,7 @@ attestation proving it was built from this repository by GitHub Actions:
 
 ```sh
 sha256sum -c SHA256SUMS.txt --ignore-missing      # macOS: shasum -a 256 -c …
-gh attestation verify sealbox-v0.1.0-x86_64-unknown-linux-gnu.tar.gz --repo <owner>/sealbox
+gh attestation verify sealbox-v0.1.0-x86_64-unknown-linux-gnu.tar.gz --repo xpim/sealbox
 ```
 
 ### Opening an unsigned app
