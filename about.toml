@@ -1,0 +1,25 @@
+# cargo-about configuration: generates THIRD_PARTY_LICENSES.html, which
+# ships with every release (MIT/BSD/OFL require including these notices).
+# Run locally with `cargo about generate about.hbs -o THIRD_PARTY_LICENSES.html`.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+]
+ignore-dev-dependencies = true
+ignore-build-dependencies = true

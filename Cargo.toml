@@ -2,8 +2,16 @@
 name = "sealbox"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95"
 description = "Encrypt files and folders into a password-protected .sbx file (GUI + CLI)"
+authors = ["Pieter Martens"]
 license = "MIT"
+readme = "README.md"
+keywords = ["encryption", "archive", "argon2", "xchacha20", "gui"]
+categories = ["cryptography", "command-line-utilities", "filesystem"]
+# Add once the repository is public:
+# repository = "https://github.com/<you>/sealbox"
+exclude = ["/.github"]
 
 [dependencies]
 anyhow = "1"
@@ -40,3 +48,8 @@ codegen-units = 1
 strip = true
 
 
+
+# Optimise dependencies even in debug/test builds: the real Argon2 settings
+# (256 MiB) used by the format tests are very slow unoptimised.
+[profile.dev.package."*"]
+opt-level = 3

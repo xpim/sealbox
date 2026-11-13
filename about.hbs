@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sealbox: third-party licenses</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 52rem; margin: 2rem auto; padding: 0 1rem; color: #222; }
+  pre { white-space: pre-wrap; background: #f5f5f5; padding: 1rem; border-radius: 6px; font-size: 0.85em; }
+  li { margin: 0.2rem 0; }
+</style>
+</head>
+<body>
+<h1>Third-party licenses</h1>
+<p>Sealbox is distributed under the MIT license. It includes the following
+open-source components, used under the licenses below.</p>
+
+<h2>Overview</h2>
+<ul>
+{{#each overview}}
+  <li><a href="#{{id}}">{{name}}</a> ({{count}})</li>
+{{/each}}
+</ul>
+
+{{#each licenses}}
+<h2 id="{{id}}">{{name}}</h2>
+<p>Used by:</p>
+<ul>
+{{#each used_by}}
+  <li>{{crate.name}} {{crate.version}}</li>
+{{/each}}
+</ul>
+<pre>{{text}}</pre>
+{{/each}}
+</body>
+</html>

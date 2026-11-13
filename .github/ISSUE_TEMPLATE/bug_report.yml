@@ -1,0 +1,49 @@
+name: Bug report
+description: Something does not work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security problems:** do not report them here. Follow SECURITY.md to
+        report them privately.
+
+        Never attach a sealbox containing real data, and never share a password.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. sealbox seal -o test.sbx some-folder
+        2. ...
+  - type: input
+    id: version
+    attributes:
+      label: Sealbox version
+      description: Output of `sealbox --version`
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Windows, macOS, Linux, Other]
+    validations:
+      required: true
+  - type: dropdown
+    id: interface
+    attributes:
+      label: Interface
+      options: [GUI, CLI, Both]
+  - type: textarea
+    id: output
+    attributes:
+      label: Error message or output
+      render: text

@@ -1,0 +1,40 @@
+# cargo-deny policy: https://embarkstudios.github.io/cargo-deny/
+# Run locally with `cargo deny check`.
+
+[graph]
+all-features = true
+
+[advisories]
+# Fail on any known vulnerability (RustSec). Unmaintained or yanked crates
+# are reported for direct dependencies only.
+unmaintained = "workspace"
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Permissive licenses only. Anything else (e.g. GPL) fails the build.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+    # Fonts bundled by egui (epaint_default_fonts).
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

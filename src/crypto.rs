@@ -43,8 +43,8 @@ use rand::RngCore;
 use rand::rngs::OsRng;
 use zeroize::{Zeroize, Zeroizing};
 
-const SALT_LEN: usize = 32;
-const NONCE_LEN: usize = 19; // 24-byte XChaCha nonce minus 5 bytes STREAM counter/flag
+pub const SALT_LEN: usize = 32;
+pub const NONCE_LEN: usize = 19; // 24-byte XChaCha nonce minus 5 bytes STREAM counter/flag
 pub const HEADER_LEN: usize = SALT_LEN + NONCE_LEN;
 const TAG_LEN: usize = 16;
 
@@ -147,11 +147,25 @@ pub struct EncryptWriter<W: Write> {
 }
 
 impl<W: Write> EncryptWriter<W> {
-    pub fn new(mut inner: W, password: &[u8], params: &SealParams) -> Result<Self> {
+    pub fn new(inner: W, password: &[u8], params: &SealParams) -> Result<Self> {
         let mut salt = [0u8; SALT_LEN];
         let mut nonce = [0u8; NONCE_LEN];
         OsRng.fill_bytes(&mut salt);
         OsRng.fill_bytes(&mut nonce);
+        Self::with_salt_and_nonce(inner, password, params, salt, nonce)
+    }
+
+    /// Like [`EncryptWriter::new`] but with caller-chosen salt and nonce.
+    /// Only for known-answer tests: reusing a salt/nonce pair with the same
+    /// password would break confidentiality.
+    #[doc(hidden)]
+    pub fn with_salt_and_nonce(
+        mut inner: W,
+        password: &[u8],
+        params: &SealParams,
+        salt: [u8; SALT_LEN],
+        nonce: [u8; NONCE_LEN],
+    ) -> Result<Self> {
         let key = derive_key(password, &salt, params.kdf)?;
         let cipher = XChaCha20Poly1305::new(Key::from_slice(key.as_ref()));
         let enc = EncryptorBE32::from_aead(cipher, nonce.as_ref().into());

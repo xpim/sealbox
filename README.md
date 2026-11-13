@@ -2,12 +2,41 @@
 
 Drag files and folders into a window, pick a password, and seal everything into
 a single encrypted `.sbx` file. Unseal it with the same password to get your
-files back. It runs on Windows, Linux and macOS, with both a GUI and a CLI, from
-one self-contained binary.
+files back. It runs on Windows, Linux and macOS, with both a GUI and a CLI.
 
-## Build
+> **Status:** pre-1.0 and **not independently audited**. See
+> [SECURITY.md](SECURITY.md) for what that means and how to report problems.
 
-Install Rust from https://rustup.rs. You also need a C compiler for the bundled
+## Install
+
+Download the archive for your system from the **Releases** page of this
+repository, unpack it and run `sealbox-gui` (or `sealbox` for the CLI). Each
+archive contains both programs, this README, the license and the licenses of
+the bundled open-source components.
+
+### Verify the download
+
+Every release lists SHA-256 checksums (`SHA256SUMS.txt`) and has a build
+attestation proving it was built from this repository by GitHub Actions:
+
+```sh
+sha256sum -c SHA256SUMS.txt --ignore-missing      # macOS: shasum -a 256 -c …
+gh attestation verify sealbox-v0.1.0-x86_64-unknown-linux-gnu.tar.gz --repo <owner>/sealbox
+```
+
+### Opening an unsigned app
+
+The binaries are not code-signed (signing requires paid certificates), so
+your system warns the first time you open them:
+
+* **macOS:** right-click `sealbox-gui` → **Open** → **Open**. Or remove the
+  quarantine flag: `xattr -d com.apple.quarantine sealbox sealbox-gui`.
+* **Windows:** in the SmartScreen dialog, click **More info** → **Run anyway**.
+* **Linux:** no warning. If needed, run `chmod +x sealbox sealbox-gui`.
+
+## Build from source
+
+Install Rust 1.95 or newer from https://rustup.rs. You also need a C compiler for the bundled
 zstd library; the standard Rust setup already provides one (MSVC Build Tools on
 Windows, Xcode Command Line Tools on macOS, gcc/clang on Linux). Then:
 
@@ -22,8 +51,9 @@ This builds two binaries in `target/release/`:
   console window, so use this one for double-clicking and for associating
   `.sbx` files.
 
-Build on each OS to get a native binary for it. The included GitHub Actions
-workflow (`.github/workflows/build.yml`) builds and tests all three on every push.
+Build on each OS to get a native binary for it. CI tests all three on every
+push, and tagged versions are released automatically (see
+[CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## GUI
 
@@ -108,22 +138,12 @@ Sealing and adding write to a temporary file that replaces the target only
 when complete, so a sealbox is never half-written. Adding verifies the whole
 existing sealbox before replacing it.
 
-### File format (v1)
+### File format
 
-```
-salt[32] | nonce_prefix[19] | STREAM ciphertext chunks...
-```
-
-On disk there is nothing beyond the random salt and nonce. The parameters of
-this outer layer (Argon2id 256 MiB / 3 passes / 4 lanes, 1 MiB chunks) are
-fixed, not stored in the file.
-
-The decrypted payload starts with a **version header**: the payload format,
-the oldest format a reader must understand, the Sealbox version that created
-the sealbox and the first Sealbox version able to read it. It is encrypted, so
-it is invisible on disk. Then follows a zstd frame holding the index (paths,
-sizes, mtimes, permissions) and the file data, and finally padding. See
-`src/crypto.rs` and `src/archive.rs`.
+The `.sbx` format is fully specified in [FORMAT.md](FORMAT.md), with test
+vectors. In short: a random salt and nonce, then ciphertext. Inside the
+encryption there is a version header, a zstd-compressed list of files with
+their contents, and padding.
 
 ### Versions and compatibility
 
@@ -141,8 +161,14 @@ sizes, mtimes, permissions) and the file data, and finally padding. See
   a wrong password or damage. To avoid this, the outer layer is kept stable.
   If it ever has to change, newer versions will keep opening older sealboxes.
 
-## Tests
+## Contributing
 
-```sh
-cargo test --release
-```
+Bug reports, ideas and pull requests are welcome; see
+[CONTRIBUTING.md](CONTRIBUTING.md). Report security problems privately as
+described in [SECURITY.md](SECURITY.md). Changes are listed in
+[CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+[MIT](LICENSE). Release archives include the licenses of all bundled
+third-party components (`THIRD_PARTY_LICENSES.html`).

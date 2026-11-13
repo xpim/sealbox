@@ -1,0 +1,145 @@
+name: Release
+
+# Push a tag like v0.2.0 to build, package and publish a GitHub Release.
+# The tag must match the version in Cargo.toml, and CHANGELOG.md must have a
+# "## [0.2.0]" section, which becomes the release notes.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    name: Check version and collect licenses
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must match Cargo.toml version
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::Tag v$tag does not match Cargo.toml version $crate"
+            exit 1
+          fi
+          if ! grep -q "^## \[$tag\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$tag]' section"
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - run: cargo about generate about.hbs -o THIRD_PARTY_LICENSES.html
+      - uses: actions/upload-artifact@v4
+        with:
+          name: third-party-licenses
+          path: THIRD_PARTY_LICENSES.html
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, ext: "",     archive: tar.gz }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,   ext: ".exe", archive: zip }
+          - { os: macos-latest,   target: aarch64-apple-darwin,     ext: "",     archive: tar.gz }
+          - { os: macos-latest,   target: x86_64-apple-darwin,      ext: "",     archive: tar.gz }
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write      # for build provenance attestations
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo test --release --locked --target ${{ matrix.target }}
+        if: matrix.target != 'x86_64-apple-darwin'  # cross-compiled, cannot run on arm64
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: third-party-licenses
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          name="sealbox-v${{ needs.prepare.outputs.version }}-${{ matrix.target }}"
+          mkdir "$name"
+          cp target/${{ matrix.target }}/release/sealbox${{ matrix.ext }} \
+             target/${{ matrix.target }}/release/sealbox-gui${{ matrix.ext }} \
+             README.md LICENSE THIRD_PARTY_LICENSES.html "$name/"
+          if [ "${{ matrix.archive }}" = zip ]; then
+            7z a -tzip "$name.zip" "$name" > /dev/null
+          else
+            tar czf "$name.tar.gz" "$name"
+          fi
+          echo "file=$name.${{ matrix.archive }}" >> "$GITHUB_OUTPUT"
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.package.outputs.file }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-${{ matrix.target }}
+          path: ${{ steps.package.outputs.file }}
+
+  publish:
+    name: Publish GitHub Release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: pkg-*
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum sealbox-* > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Release notes from CHANGELOG.md
+        run: |
+          v="${{ needs.prepare.outputs.version }}"
+          awk -v v="$v" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          cat >> notes.md <<'EOF'
+
+          ### Verifying the download
+
+          Check the checksum against `SHA256SUMS.txt`, and verify that the
+          archive was built by this repository's release workflow:
+
+          ```sh
+          sha256sum -c SHA256SUMS.txt --ignore-missing
+          gh attestation verify <archive> --repo ${{ github.repository }}
+          ```
+
+          The binaries are not code-signed; see the README for how to open
+          them on macOS and Windows.
+          EOF
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "Sealbox ${{ needs.prepare.outputs.version }}" \
+            --notes-file notes.md \
+            $([[ "${{ needs.prepare.outputs.version }}" == 0.* ]] && echo --prerelease)
