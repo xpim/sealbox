@@ -1,4 +1,4 @@
-//! Encrypted container layer of the `.vault` format.
+//! Encrypted container layer of the `.sbx` format.
 //!
 //! On-disk layout:
 //!
@@ -10,10 +10,10 @@
 //! ```
 //!
 //! There is deliberately no magic number, version field or parameter block.
-//! Every byte of a vault is either random (salt, nonce) or ciphertext, so the
+//! Every byte of a sealbox is either random (salt, nonce) or ciphertext, so the
 //! file looks like uniformly random data and does not identify the program
 //! that wrote it. The cost of this is that the format parameters
-//! ([`VaultParams::default`]) are fixed constants of format v1. A future
+//! ([`SealParams::default`]) are fixed constants of format v1. A future
 //! format would be recognised by trial decryption (try each known parameter
 //! set until the first chunk authenticates), not by a header field.
 //!
@@ -52,20 +52,20 @@ pub struct KdfParams {
     pub p_cost: u32,
 }
 
-/// Parameters needed to read or write a vault. They are not stored in the
+/// Parameters needed to read or write a sealbox. They are not stored in the
 /// file, so writer and reader must agree on them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct VaultParams {
+pub struct SealParams {
     pub kdf: KdfParams,
     pub chunk_size: u32,
 }
 
-impl Default for VaultParams {
+impl Default for SealParams {
     /// Format v1: Argon2id with 256 MiB, 3 passes, 4 lanes (roughly half a
     /// second to a second on a modern machine, which makes guessing passwords
     /// offline very expensive), and 1 MiB chunks.
     ///
-    /// Changing any of these makes existing vaults unreadable. Only change
+    /// Changing any of these makes existing sealboxes unreadable. Only change
     /// them together with a fallback that also tries the old values.
     fn default() -> Self {
         Self {
@@ -116,7 +116,7 @@ fn read_full<R: Read>(r: &mut R, buf: &mut [u8]) -> io::Result<usize> {
 
 /// A `Write` adapter that encrypts everything written to it. Call
 /// [`EncryptWriter::finish`] at the end: the final chunk is only written
-/// then, and a vault without its final chunk is rejected as truncated.
+/// then, and a sealbox without its final chunk is rejected as truncated.
 pub struct EncryptWriter<W: Write> {
     inner: W,
     enc: Option<EncryptorBE32<XChaCha20Poly1305>>,
@@ -127,7 +127,7 @@ pub struct EncryptWriter<W: Write> {
 }
 
 impl<W: Write> EncryptWriter<W> {
-    pub fn new(mut inner: W, password: &[u8], params: &VaultParams) -> Result<Self> {
+    pub fn new(mut inner: W, password: &[u8], params: &SealParams) -> Result<Self> {
         let mut salt = [0u8; SALT_LEN];
         let mut nonce = [0u8; NONCE_LEN];
         OsRng.fill_bytes(&mut salt);
@@ -136,7 +136,7 @@ impl<W: Write> EncryptWriter<W> {
         let cipher = XChaCha20Poly1305::new(Key::from_slice(key.as_ref()));
         let enc = EncryptorBE32::from_aead(cipher, nonce.as_ref().into());
         let aad = header_bytes(&salt, &nonce);
-        inner.write_all(&aad).context("writing vault header")?;
+        inner.write_all(&aad).context("writing sealbox header")?;
         let chunk_size = params.chunk_size as usize;
         Ok(Self {
             inner,
@@ -204,7 +204,7 @@ impl<W: Write> Write for EncryptWriter<W> {
 // Decryption
 // ---------------------------------------------------------------------------
 
-/// A `Read` adapter that decrypts and authenticates a vault stream. It only
+/// A `Read` adapter that decrypts and authenticates a sealbox stream. It only
 /// ever releases plaintext that has been authenticated. Reaching EOF (a read
 /// returning 0) means the final chunk was present and valid, so the stream
 /// was not truncated.
@@ -222,14 +222,14 @@ pub struct DecryptReader<R: Read> {
 /// Error message for authentication failures. A wrong password and a
 /// tampered file look identical by design.
 pub const AUTH_FAILED: &str =
-    "wrong password, or the vault file is corrupted or has been tampered with";
+    "wrong password, or the sealbox file is corrupted or has been tampered with";
 
 impl<R: Read> DecryptReader<R> {
-    pub fn new(mut inner: R, password: &[u8], params: &VaultParams) -> Result<Self> {
+    pub fn new(mut inner: R, password: &[u8], params: &SealParams) -> Result<Self> {
         let mut hb = [0u8; HEADER_LEN];
-        let n = read_full(&mut inner, &mut hb).context("reading vault header")?;
+        let n = read_full(&mut inner, &mut hb).context("reading sealbox header")?;
         if n < HEADER_LEN {
-            bail!("not a vault file (file too short)");
+            bail!("not a sealbox file (file too short)");
         }
         let (salt, nonce) = hb.split_at(SALT_LEN);
         let key = derive_key(password, salt, params.kdf)?;
@@ -309,7 +309,7 @@ mod tests {
     use super::*;
 
     /// Cheap KDF and tiny chunks so tests are fast and cross chunk borders.
-    const FAST: VaultParams = VaultParams {
+    const FAST: SealParams = SealParams {
         kdf: KdfParams {
             m_cost_kib: 64,
             t_cost: 1,
@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn no_identifying_bytes() {
-        // Two vaults of the same content share no fixed prefix: there is no
+        // Two sealboxes of the same content share no fixed prefix: there is no
         // magic number, version or parameter block anywhere.
         let (a, b) = (roundtrip(b"hello"), roundtrip(b"hello"));
         let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();

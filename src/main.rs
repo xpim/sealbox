@@ -1,26 +1,26 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use the_vault::cli::{self, Cli};
+use sealbox::cli::{self, Cli};
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().collect();
 
-    // `vault` with no arguments, or `vault some.vault` (e.g. double-clicking a
-    // .vault file associated with the app), opens the GUI.
+    // `sealbox` with no arguments, or `sealbox some.sbx` (e.g. double-clicking a
+    // .sbx file associated with the app), opens the GUI.
     let gui_target = match args.len() {
         1 => Some(None),
-        2 if the_vault::is_vault_path(args[1].as_ref()) => Some(Some(args[1].clone().into())),
+        2 if sealbox::is_sealbox_path(args[1].as_ref()) => Some(Some(args[1].clone().into())),
         _ => None,
     };
     let result = match gui_target {
-        Some(vault) => {
+        Some(sealbox) => {
             detach_console_if_owned();
-            the_vault::gui::run(vault)
+            sealbox::gui::run(sealbox)
         }
         None => match Cli::parse().cmd {
             Some(cmd) => cli::run(cmd),
-            None => the_vault::gui::run(None),
+            None => sealbox::gui::run(None),
         },
     };
     match result {

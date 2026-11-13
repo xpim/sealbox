@@ -9,22 +9,22 @@ use eframe::egui::{self, Color32, RichText};
 use zeroize::Zeroizing;
 
 use crate::archive::{self, Entry, EntryKind, Progress, Summary};
-use crate::crypto::VaultParams;
+use crate::crypto::SealParams;
 use crate::{MIN_PASSWORD_LEN, human_size};
 
-pub fn run(open_vault: Option<PathBuf>) -> Result<()> {
+pub fn run(open_sealbox: Option<PathBuf>) -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("The Vault")
+            .with_title("Sealbox")
             .with_inner_size([760.0, 540.0])
             .with_min_inner_size([480.0, 380.0])
             .with_drag_and_drop(true),
         ..Default::default()
     };
     eframe::run_native(
-        "The Vault",
+        "Sealbox",
         options,
-        Box::new(move |_cc| Ok(Box::new(App::new(open_vault)))),
+        Box::new(move |_cc| Ok(Box::new(App::new(open_sealbox)))),
     )
     .map_err(|e| anyhow!("could not start the GUI: {e}"))
 }
@@ -36,7 +36,7 @@ struct ContainerItem {
     size: u64,
 }
 
-struct OpenedVault {
+struct OpenedBox {
     path: PathBuf,
     entries: Vec<Entry>,
     password: Zeroizing<String>,
@@ -71,7 +71,7 @@ struct App {
     items: Vec<ContainerItem>,
     password: Zeroizing<String>,
     confirm: Zeroizing<String>,
-    vault: Option<OpenedVault>,
+    opened: Option<OpenedBox>,
     unlock: Option<UnlockPrompt>,
     job: Option<Job>,
     status: Option<Status>,
@@ -79,18 +79,18 @@ struct App {
 }
 
 impl App {
-    fn new(open_vault: Option<PathBuf>) -> Self {
+    fn new(open_sealbox: Option<PathBuf>) -> Self {
         let mut app = Self {
             items: Vec::new(),
             password: Zeroizing::new(String::new()),
             confirm: Zeroizing::new(String::new()),
-            vault: None,
+            opened: None,
             unlock: None,
             job: None,
             status: None,
             overwrite: false,
         };
-        if let Some(p) = open_vault {
+        if let Some(p) = open_sealbox {
             app.ask_unlock(p);
         }
         app
@@ -107,7 +107,7 @@ impl App {
 
     fn add_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
         for path in paths {
-            // Same rules as the vault itself: each item lives at the top
+            // Same rules as the sealbox itself: each item lives at the top
             // level under its own name, so names must be unique.
             let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
                 continue;
@@ -156,31 +156,31 @@ impl App {
         });
     }
 
-    fn save_vault(&mut self, ctx: &egui::Context) {
+    fn save_sealbox(&mut self, ctx: &egui::Context) {
         let Some(mut out) = rfd::FileDialog::new()
-            .set_title("Save encrypted vault")
-            .add_filter("Vault", &["vault"])
-            .set_file_name("my-files.vault")
+            .set_title("Save sealbox")
+            .add_filter("Sealbox", &["sbx"])
+            .set_file_name("my-files.sbx")
             .save_file()
         else {
             return;
         };
         if out
             .extension()
-            .is_none_or(|e| !e.eq_ignore_ascii_case("vault"))
+            .is_none_or(|e| !e.eq_ignore_ascii_case("sbx"))
         {
-            out.as_mut_os_string().push(".vault");
+            out.as_mut_os_string().push(".sbx");
         }
         let inputs: Vec<PathBuf> = self.items.iter().map(|i| i.path.clone()).collect();
         let pw = std::mem::replace(&mut self.password, Zeroizing::new(String::new()));
         self.confirm = Zeroizing::new(String::new());
-        self.start(ctx, "Encrypting…", true, move |p| {
+        self.start(ctx, "Sealing…", true, move |p| {
             // The save dialog already asked about replacing an existing file.
-            let r = archive::create_vault(
+            let r = archive::seal(
                 &inputs,
                 &out,
                 pw.as_bytes(),
-                &VaultParams::default(),
+                &SealParams::default(),
                 archive::DEFAULT_COMPRESSION_LEVEL,
                 true,
                 p,
@@ -190,8 +190,8 @@ impl App {
     }
 
     fn extract(&mut self, ctx: &egui::Context) {
-        let Some(v) = &self.vault else { return };
-        let mut dialog = rfd::FileDialog::new().set_title("Extract vault into folder");
+        let Some(v) = &self.opened else { return };
+        let mut dialog = rfd::FileDialog::new().set_title("Unseal into folder");
         if let Some(parent) = v.path.parent() {
             dialog = dialog.set_directory(parent);
         }
@@ -199,12 +199,12 @@ impl App {
             return;
         };
         let (path, pw, overwrite) = (v.path.clone(), v.password.clone(), self.overwrite);
-        self.start(ctx, "Decrypting…", true, move |p| {
+        self.start(ctx, "Unsealing…", true, move |p| {
             JobDone::Extracted(
-                archive::extract_vault(
+                archive::unseal(
                     &path,
                     pw.as_bytes(),
-                    &VaultParams::default(),
+                    &SealParams::default(),
                     &dest,
                     overwrite,
                     p,
@@ -221,12 +221,12 @@ impl App {
         match done {
             JobDone::Created(Ok(s), out) => {
                 let mut msg = format!(
-                    "Saved {} file(s), {} to {} ({}{})",
+                    "Sealed {} file(s), {} into {} ({}{})",
                     s.files,
                     human_size(s.bytes),
                     out.display(),
-                    human_size(s.vault_size),
-                    crate::cli::ratio(s.bytes, s.vault_size)
+                    human_size(s.sealbox_size),
+                    crate::cli::ratio(s.bytes, s.sealbox_size)
                 );
                 if !s.warnings.is_empty() {
                     msg += &format!(
@@ -240,7 +240,7 @@ impl App {
             JobDone::Created(Err(e), _) => self.status = Some(Status::Error(format!("{e:#}"))),
             JobDone::Opened(Ok(entries), path, password) => {
                 self.unlock = None;
-                self.vault = Some(OpenedVault {
+                self.opened = Some(OpenedBox {
                     path,
                     entries,
                     password,
@@ -256,7 +256,7 @@ impl App {
             }
             JobDone::Extracted(Ok(s), dest) => {
                 self.status = Some(Status::Info(format!(
-                    "Extracted {} file(s), {} into {}",
+                    "Unsealed {} file(s), {} into {}",
                     s.files,
                     human_size(s.bytes),
                     dest.display()
@@ -277,30 +277,30 @@ impl App {
         if dropped.is_empty() || self.job.is_some() {
             return;
         }
-        // Dropping a single .vault file opens it; anything else goes into
+        // Dropping a single .sbx file opens it; anything else goes into
         // the container.
-        if dropped.len() == 1 && crate::is_vault_path(&dropped[0]) {
+        if dropped.len() == 1 && crate::is_sealbox_path(&dropped[0]) {
             self.ask_unlock(dropped[0].clone());
         } else {
-            self.vault = None;
+            self.opened = None;
             self.add_paths(dropped);
         }
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("🔒 The Vault");
+            ui.heading("🔒 Sealbox");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Open vault…").clicked()
+                if ui.button("Open sealbox…").clicked()
                     && let Some(p) = rfd::FileDialog::new()
-                        .set_title("Open vault")
-                        .add_filter("Vault", &["vault"])
+                        .set_title("Open sealbox")
+                        .add_filter("Sealbox", &["sbx"])
                         .pick_file()
                 {
                     self.ask_unlock(p);
                 }
-                if self.vault.is_some() && ui.button("Back to container").clicked() {
-                    self.vault = None; // drops and zeroizes the password
+                if self.opened.is_some() && ui.button("Back to container").clicked() {
+                    self.opened = None; // drops and zeroizes the password
                 }
             });
         });
@@ -345,13 +345,10 @@ impl App {
                 };
                 let ok = ready && long_enough && matches;
                 if ui
-                    .add_enabled(
-                        ok,
-                        egui::Button::new(RichText::new("💾 Save as vault…").strong()),
-                    )
+                    .add_enabled(ok, egui::Button::new(RichText::new("🔒 Seal…").strong()))
                     .clicked()
                 {
-                    self.save_vault(ctx);
+                    self.save_sealbox(ctx);
                 }
                 ui.label(RichText::new(hint).weak());
             });
@@ -391,7 +388,7 @@ impl App {
                             RichText::new(if hovering {
                                 "Release to add to the container"
                             } else {
-                                "Drag and drop files or folders here\n\nor drop a .vault file to open it"
+                                "Drag and drop files or folders here\n\nor drop a .sbx file to open it"
                             })
                             .size(18.0)
                             .weak(),
@@ -424,8 +421,8 @@ impl App {
         });
     }
 
-    fn vault_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let Some(v) = &self.vault else { return };
+    fn sealbox_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let Some(v) = &self.opened else { return };
         let files = v
             .entries
             .iter()
@@ -442,7 +439,7 @@ impl App {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if ui
-                    .button(RichText::new("📤 Extract all to…").strong())
+                    .button(RichText::new("📤 Unseal all to…").strong())
                     .clicked()
                 {
                     self.extract(ctx);
@@ -453,7 +450,7 @@ impl App {
         });
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
-            let Some(v) = &self.vault else { return };
+            let Some(v) = &self.opened else { return };
             ui.label(
                 RichText::new(format!(
                     "🔓 {title}: {files} file(s), {}",
@@ -496,7 +493,7 @@ impl App {
         };
         let mut submit = false;
         let mut cancel = false;
-        egui::Window::new("Unlock vault")
+        egui::Window::new("Unlock sealbox")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -543,7 +540,7 @@ impl App {
             prompt.error = None;
             self.start(ctx, "Unlocking…", false, move |_| {
                 JobDone::Opened(
-                    archive::list_vault(&path, pw.as_bytes(), &VaultParams::default()),
+                    archive::list_contents(&path, pw.as_bytes(), &SealParams::default()),
                     path,
                     pw,
                 )
@@ -614,8 +611,8 @@ impl eframe::App for App {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_enabled_ui(!busy && self.unlock.is_none(), |ui| {
-                if self.vault.is_some() {
-                    self.vault_view(ui, ctx);
+                if self.opened.is_some() {
+                    self.sealbox_view(ui, ctx);
                 } else {
                     self.container_view(ui, ctx);
                 }

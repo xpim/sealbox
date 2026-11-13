@@ -1,8 +1,8 @@
 [package]
-name = "the_vault"
+name = "sealbox"
 version = "0.1.0"
 edition = "2024"
-description = "Encrypt files and folders into a password-protected .vault file (GUI + CLI)"
+description = "Encrypt files and folders into a password-protected .sbx file (GUI + CLI)"
 license = "MIT"
 
 [dependencies]
@@ -23,7 +23,7 @@ zstd = { version = "0.13", features = ["zstdmt"] }
 windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
 
 [[bin]]
-name = "vault"
+name = "sealbox"
 path = "src/main.rs"
 
 [profile.release]

@@ -1,4 +1,4 @@
-//! Packing files/folders into a vault and extracting them again.
+//! Packing files/folders into a sealbox and extracting them again.
 //!
 //! The plaintext that goes through [`crate::crypto`] looks like this:
 //!
@@ -14,16 +14,16 @@
 //!     i64 modification time, seconds since the Unix epoch
 //!     u64 size in bytes (0 for directories)
 //!   file contents, concatenated in index order
-//! zero padding (Padmé) so the vault size reveals little about the content size
+//! zero padding (Padmé) so the sealbox size reveals little about the content size
 //! ```
 //!
 //! Compression happens before encryption (encrypted data does not compress).
 //! The padding is applied to the *compressed* size, since that is what the
-//! vault's file size would otherwise reveal. The payload format byte is
+//! sealbox's file size would otherwise reveal. The payload format byte is
 //! inside the encryption, so it is invisible on disk but leaves room for
 //! future formats.
 //!
-//! The index comes first, so listing a vault only has to decrypt and
+//! The index comes first, so listing a sealbox only has to decrypt and
 //! decompress the start of it.
 
 use std::collections::HashSet;
@@ -37,7 +37,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow, bail};
 use walkdir::WalkDir;
 
-use crate::crypto::{DecryptReader, EncryptWriter, VaultParams};
+use crate::crypto::{DecryptReader, EncryptWriter, SealParams};
 
 const INDEX_MAGIC: &[u8; 8] = b"TVIDX001";
 const KIND_DIR: u8 = 1;
@@ -45,7 +45,7 @@ const KIND_FILE: u8 = 2;
 const MAX_PATH_LEN: u32 = 32 * 1024;
 const MAX_ENTRIES: u64 = 50_000_000;
 /// Cap on the total size of all paths in the index. Compression lets a tiny
-/// malicious vault claim a huge index; this bounds the memory it can take.
+/// malicious sealbox claim a huge index; this bounds the memory it can take.
 const MAX_INDEX_PATH_BYTES: u64 = 256 * 1024 * 1024;
 const PAYLOAD_ZSTD: u8 = 1;
 /// zstd level used when none is given (1 = fastest, 19 = smallest).
@@ -57,7 +57,7 @@ pub enum EntryKind {
     File,
 }
 
-/// One item stored inside a vault.
+/// One item stored inside a sealbox.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub kind: EntryKind,
@@ -103,8 +103,8 @@ pub struct Summary {
     pub files: u64,
     pub dirs: u64,
     pub bytes: u64,
-    /// Size of the vault file (only set when creating).
-    pub vault_size: u64,
+    /// Size of the sealbox file (only set when creating).
+    pub sealbox_size: u64,
     /// Non-fatal issues, e.g. skipped symlinks.
     pub warnings: Vec<String>,
 }
@@ -113,7 +113,7 @@ pub struct Summary {
 // Path handling
 // ---------------------------------------------------------------------------
 
-/// Validate one path component for storing in, or extracting from, a vault.
+/// Validate one path component for storing in, or extracting from, a sealbox.
 fn check_component(c: &str) -> Result<()> {
     if c.is_empty() || c == "." || c == ".." {
         bail!("invalid path component {c:?}");
@@ -134,11 +134,11 @@ fn check_component(c: &str) -> Result<()> {
     }
 }
 
-/// Split and validate an archive path from a (possibly malicious) vault.
+/// Split and validate an archive path from a (possibly malicious) sealbox.
 fn sanitize_archive_path(p: &str) -> Result<Vec<&str>> {
     let comps: Vec<&str> = p.split('/').collect();
     for c in &comps {
-        check_component(c).with_context(|| format!("unsafe path in vault: {p:?}"))?;
+        check_component(c).with_context(|| format!("unsafe path in sealbox: {p:?}"))?;
     }
     Ok(comps)
 }
@@ -152,7 +152,7 @@ fn os_name(name: &std::ffi::OsStr, full: &Path) -> Result<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Creating vaults
+// Creating sealboxes
 // ---------------------------------------------------------------------------
 
 struct Source {
@@ -179,7 +179,7 @@ fn mode_of(_md: &fs::Metadata) -> u32 {
 }
 
 /// Walk the inputs and build the list of everything that will be stored.
-/// Each input ends up at the top level of the vault under its own name.
+/// Each input ends up at the top level of the sealbox under its own name.
 fn collect(
     inputs: &[PathBuf],
     exclude: Option<&Path>,
@@ -293,16 +293,16 @@ fn copy_with_progress<R: Read, W: Write>(
     Ok(copied)
 }
 
-/// Encrypt `inputs` (files and/or folders) into a new vault at `output`.
+/// Encrypt `inputs` (files and/or folders) into a new sealbox at `output`.
 ///
-/// The vault is written to a temporary file next to `output` first and moved
+/// The sealbox is written to a temporary file next to `output` first and moved
 /// into place only once it is complete, so a failure never leaves a broken
-/// or half-written vault behind.
-pub fn create_vault(
+/// or half-written sealbox behind.
+pub fn seal(
     inputs: &[PathBuf],
     output: &Path,
     password: &[u8],
-    params: &VaultParams,
+    params: &SealParams,
     compression_level: i32,
     overwrite: bool,
     progress: &Progress,
@@ -331,7 +331,7 @@ pub fn create_vault(
         _ => Path::new("."),
     };
     let tmp = tempfile::Builder::new()
-        .prefix(".vault-tmp-")
+        .prefix(".sealbox-tmp-")
         .tempfile_in(dir)
         .with_context(|| format!("cannot write in {}", dir.display()))?;
     let file = tmp.as_file().try_clone()?;
@@ -383,12 +383,12 @@ pub fn create_vault(
     }
     .map_err(|e| e.error)
     .with_context(|| format!("cannot write {}", output.display()))?;
-    summary.vault_size = fs::metadata(output).map(|m| m.len()).unwrap_or(0);
+    summary.sealbox_size = fs::metadata(output).map(|m| m.len()).unwrap_or(0);
     Ok(summary)
 }
 
 // ---------------------------------------------------------------------------
-// Reading vaults
+// Reading sealboxes
 // ---------------------------------------------------------------------------
 
 fn read_u8<R: Read>(r: &mut R) -> io::Result<u8> {
@@ -408,7 +408,7 @@ fn read_u64<R: Read>(r: &mut R) -> io::Result<u64> {
 }
 
 fn read_index<R: Read>(r: &mut R) -> Result<Vec<Entry>> {
-    let bad = || anyhow!("vault contents are malformed");
+    let bad = || anyhow!("sealbox contents are malformed");
     let mut magic = [0u8; 8];
     r.read_exact(&mut magic)?;
     if &magic != INDEX_MAGIC {
@@ -455,12 +455,12 @@ fn read_index<R: Read>(r: &mut R) -> Result<Vec<Entry>> {
 type Decrypted = BufReader<DecryptReader<BufReader<File>>>;
 type Payload = zstd::stream::read::Decoder<'static, Decrypted>;
 
-/// Decrypt the vault and return a reader over the decompressed archive.
-fn open_vault(vault: &Path, password: &[u8], params: &VaultParams) -> Result<Payload> {
-    let f = File::open(vault).with_context(|| format!("cannot open {}", vault.display()))?;
+/// Decrypt the sealbox and return a reader over the decompressed archive.
+fn open_sealbox(sealbox: &Path, password: &[u8], params: &SealParams) -> Result<Payload> {
+    let f = File::open(sealbox).with_context(|| format!("cannot open {}", sealbox.display()))?;
     let mut r = DecryptReader::new(BufReader::new(f), password, params)?;
     if read_u8(&mut r)? != PAYLOAD_ZSTD {
-        bail!("vault contents use an unsupported format (made by a newer version?)");
+        bail!("sealbox contents use an unsupported format (made by a newer version?)");
     }
     let z = zstd::stream::read::Decoder::with_buffer(BufReader::new(r))?.single_frame();
     Ok(z)
@@ -468,19 +468,19 @@ fn open_vault(vault: &Path, password: &[u8], params: &VaultParams) -> Result<Pay
 
 /// Verify that the archive ended exactly where the index said it would,
 /// then read the padding through to the end of the encrypted stream. That
-/// authenticates the final chunk, proving the vault was not truncated.
+/// authenticates the final chunk, proving the sealbox was not truncated.
 fn finish_payload(mut z: Payload) -> Result<()> {
     let mut extra = [0u8; 1];
     if z.read(&mut extra)? != 0 {
-        bail!("vault contents are malformed (unexpected trailing data)");
+        bail!("sealbox contents are malformed (unexpected trailing data)");
     }
     io::copy(&mut z.finish(), &mut io::sink())?;
     Ok(())
 }
 
-/// Decrypt only the index of a vault and return its entries.
-pub fn list_vault(vault: &Path, password: &[u8], params: &VaultParams) -> Result<Vec<Entry>> {
-    let mut r = open_vault(vault, password, params)?;
+/// Decrypt only the index of a sealbox and return its entries.
+pub fn list_contents(sealbox: &Path, password: &[u8], params: &SealParams) -> Result<Vec<Entry>> {
+    let mut r = open_sealbox(sealbox, password, params)?;
     read_index(&mut r)
 }
 
@@ -507,7 +507,7 @@ fn ensure_dirs(dest: &Path, comps: &[&str], created: &mut Vec<PathBuf>) -> Resul
 fn apply_mode(f: &File, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     if mode != 0 {
-        // Never restore setuid/setgid/sticky bits from an untrusted vault.
+        // Never restore setuid/setgid/sticky bits from an untrusted sealbox.
         let _ = f.set_permissions(fs::Permissions::from_mode(mode & 0o777));
     }
 }
@@ -522,18 +522,18 @@ fn to_systime(secs: i64) -> Option<SystemTime> {
     }
 }
 
-/// Decrypt a vault into `dest`. Existing files are only replaced when
+/// Decrypt a sealbox into `dest`. Existing files are only replaced when
 /// `overwrite` is set. If anything goes wrong (wrong password, tampering,
 /// disk full, cancel), everything this call created is removed again.
-pub fn extract_vault(
-    vault: &Path,
+pub fn unseal(
+    sealbox: &Path,
     password: &[u8],
-    params: &VaultParams,
+    params: &SealParams,
     dest: &Path,
     overwrite: bool,
     progress: &Progress,
 ) -> Result<Summary> {
-    let mut r = open_vault(vault, password, params)?;
+    let mut r = open_sealbox(sealbox, password, params)?;
     let entries = read_index(&mut r)?;
 
     // Check for conflicts before touching the disk.
@@ -596,7 +596,7 @@ pub fn extract_vault(
                     let mut w = BufWriter::new(f);
                     let n = copy_with_progress(&mut r, &mut w, e.size, progress)?;
                     if n != e.size {
-                        bail!("vault contents are malformed (file data too short)");
+                        bail!("sealbox contents are malformed (file data too short)");
                     }
                     let f = w.into_inner().map_err(|e| e.into_error())?;
                     apply_mode(&f, e.mode);
@@ -627,7 +627,7 @@ pub fn extract_vault(
 mod tests {
     use super::*;
 
-    const FAST: VaultParams = VaultParams {
+    const FAST: SealParams = SealParams {
         kdf: crate::crypto::KdfParams {
             m_cost_kib: 64,
             t_cost: 1,
@@ -636,7 +636,7 @@ mod tests {
         chunk_size: 64 * 1024,
     };
 
-    /// Incompressible test data (xorshift), so vaults span many chunks.
+    /// Incompressible test data (xorshift), so sealboxes span many chunks.
     fn pseudo_random(len: usize) -> Vec<u8> {
         let mut x = 0x2545_f491_4f6c_dd1du64;
         (0..len)
@@ -655,16 +655,16 @@ mod tests {
         let src = tmp.path().join("log.txt");
         let text = "2026-11-13 INFO request handled in 12ms\n".repeat(100_000);
         fs::write(&src, &text).unwrap();
-        let vault = tmp.path().join("v.vault");
+        let sealbox = tmp.path().join("v.sbx");
         let p = Progress::default();
-        let s = create_vault(&[src], &vault, b"pw", &FAST, 3, false, &p).unwrap();
+        let s = seal(&[src], &sealbox, b"pw", &FAST, 3, false, &p).unwrap();
         assert!(
-            s.vault_size < text.len() as u64 / 20,
-            "vault {} bytes",
-            s.vault_size
+            s.sealbox_size < text.len() as u64 / 20,
+            "sealbox {} bytes",
+            s.sealbox_size
         );
         let out = tmp.path().join("out");
-        extract_vault(&vault, b"pw", &FAST, &out, false, &p).unwrap();
+        unseal(&sealbox, b"pw", &FAST, &out, false, &p).unwrap();
         assert_eq!(fs::read_to_string(out.join("log.txt")).unwrap(), text);
     }
 
@@ -710,40 +710,40 @@ mod tests {
         let single = tmp.path().join("note.md");
         fs::write(&single, b"# note").unwrap();
 
-        let vault = tmp.path().join("out.vault");
+        let sealbox = tmp.path().join("out.sbx");
         let p = Progress::default();
-        let s = create_vault(&[src.clone(), single], &vault, b"pw", &FAST, 3, false, &p).unwrap();
+        let s = seal(&[src.clone(), single], &sealbox, b"pw", &FAST, 3, false, &p).unwrap();
         assert_eq!(s.files, 3);
         assert_eq!(p.fraction(), 1.0);
 
-        let raw = fs::read(&vault).unwrap();
+        let raw = fs::read(&sealbox).unwrap();
         assert!(!raw.windows(5).any(|w| w == b"a.txt"), "file name leaked");
         assert!(!raw.windows(5).any(|w| w == b"hello"), "content leaked");
 
-        let names: Vec<String> = list_vault(&vault, b"pw", &FAST)
+        let names: Vec<String> = list_contents(&sealbox, b"pw", &FAST)
             .unwrap()
             .into_iter()
             .map(|e| e.path)
             .collect();
         assert!(names.contains(&"src/docs/empty".to_string()));
         assert!(names.contains(&"note.md".to_string()));
-        assert!(list_vault(&vault, b"wrong", &FAST).is_err());
+        assert!(list_contents(&sealbox, b"wrong", &FAST).is_err());
 
         let out = tmp.path().join("out");
-        extract_vault(&vault, b"pw", &FAST, &out, false, &p).unwrap();
+        unseal(&sealbox, b"pw", &FAST, &out, false, &p).unwrap();
         assert_eq!(fs::read(out.join("src/docs/a.txt")).unwrap(), b"hello");
         assert_eq!(fs::read(out.join("src/big.bin")).unwrap(), big);
         assert_eq!(fs::read(out.join("note.md")).unwrap(), b"# note");
         assert!(out.join("src/docs/empty").is_dir());
 
         // Second extract refuses to clobber, then works with overwrite.
-        assert!(extract_vault(&vault, b"pw", &FAST, &out, false, &p).is_err());
-        extract_vault(&vault, b"pw", &FAST, &out, true, &p).unwrap();
-        // Refuse to overwrite the vault itself without the flag.
+        assert!(unseal(&sealbox, b"pw", &FAST, &out, false, &p).is_err());
+        unseal(&sealbox, b"pw", &FAST, &out, true, &p).unwrap();
+        // Refuse to overwrite the sealbox itself without the flag.
         assert!(
-            create_vault(
+            seal(
                 std::slice::from_ref(&out),
-                &vault,
+                &sealbox,
                 b"pw",
                 &FAST,
                 3,
@@ -761,15 +761,24 @@ mod tests {
         fs::create_dir(&src).unwrap();
         fs::write(src.join("a"), vec![1u8; 10]).unwrap();
         fs::write(src.join("b"), pseudo_random(3_000_000)).unwrap();
-        let vault = tmp.path().join("v.vault");
-        create_vault(&[src], &vault, b"pw", &FAST, 3, false, &Progress::default()).unwrap();
+        let sealbox = tmp.path().join("v.sbx");
+        seal(
+            &[src],
+            &sealbox,
+            b"pw",
+            &FAST,
+            3,
+            false,
+            &Progress::default(),
+        )
+        .unwrap();
         // Corrupt the end of the file: the start decrypts, the end does not.
-        let mut raw = fs::read(&vault).unwrap();
+        let mut raw = fs::read(&sealbox).unwrap();
         let n = raw.len();
         raw[n - 5] ^= 0xff;
-        fs::write(&vault, raw).unwrap();
+        fs::write(&sealbox, raw).unwrap();
         let out = tmp.path().join("out");
-        assert!(extract_vault(&vault, b"pw", &FAST, &out, false, &Progress::default()).is_err());
+        assert!(unseal(&sealbox, b"pw", &FAST, &out, false, &Progress::default()).is_err());
         assert_eq!(
             fs::read_dir(&out).unwrap().count(),
             0,
@@ -784,15 +793,24 @@ mod tests {
         let src = tmp.path().join("d");
         fs::create_dir(&src).unwrap();
         fs::write(src.join("f"), b"payload").unwrap();
-        let vault = tmp.path().join("v.vault");
-        create_vault(&[src], &vault, b"pw", &FAST, 3, false, &Progress::default()).unwrap();
+        let sealbox = tmp.path().join("v.sbx");
+        seal(
+            &[src],
+            &sealbox,
+            b"pw",
+            &FAST,
+            3,
+            false,
+            &Progress::default(),
+        )
+        .unwrap();
 
         let out = tmp.path().join("out");
         let elsewhere = tmp.path().join("elsewhere");
         fs::create_dir_all(&out).unwrap();
         fs::create_dir_all(&elsewhere).unwrap();
         std::os::unix::fs::symlink(&elsewhere, out.join("d")).unwrap();
-        assert!(extract_vault(&vault, b"pw", &FAST, &out, true, &Progress::default()).is_err());
+        assert!(unseal(&sealbox, b"pw", &FAST, &out, true, &Progress::default()).is_err());
         assert!(!elsewhere.join("f").exists());
     }
 }

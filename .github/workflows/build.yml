@@ -11,14 +11,14 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact: vault-linux-x86_64
-            bin: vault
+            artifact: sealbox-linux-x86_64
+            bin: sealbox
           - os: windows-latest
-            artifact: vault-windows-x86_64
-            bin: vault.exe
+            artifact: sealbox-windows-x86_64
+            bin: sealbox.exe
           - os: macos-latest
-            artifact: vault-macos-arm64
-            bin: vault
+            artifact: sealbox-macos-arm64
+            bin: sealbox
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

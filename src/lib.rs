@@ -1,20 +1,18 @@
-//! The Vault: encrypt files and folders into a single password-protected
-//! `.vault` file, from a GUI or the command line.
+//! Sealbox: encrypt files and folders into a single password-protected
+//! `.sbx` file, from a GUI or the command line.
 
 pub mod archive;
 pub mod cli;
 pub mod crypto;
 pub mod gui;
 
-/// Minimum password length accepted when creating a new vault.
+/// Minimum password length accepted when creating a new sealbox.
 pub const MIN_PASSWORD_LEN: usize = 8;
 
-/// Is this an existing file with a `.vault` extension? Vault files contain
+/// Is this an existing file with a `.sbx` extension? Sealbox files contain
 /// no recognisable signature, so the extension is the only way to spot them.
-pub fn is_vault_path(p: &std::path::Path) -> bool {
-    p.is_file()
-        && p.extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("vault"))
+pub fn is_sealbox_path(p: &std::path::Path) -> bool {
+    p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("sbx"))
 }
 
 pub fn human_size(bytes: u64) -> String {

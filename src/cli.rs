@@ -9,16 +9,16 @@ use clap::{Parser, Subcommand};
 use zeroize::Zeroizing;
 
 use crate::archive::{self, EntryKind, Progress, Summary};
-use crate::crypto::VaultParams;
+use crate::crypto::SealParams;
 use crate::{MIN_PASSWORD_LEN, human_size};
 
 #[derive(Parser)]
 #[command(
-    name = "vault",
+    name = "sealbox",
     version,
-    about = "Encrypt files and folders into a single password-protected .vault file.",
+    about = "Encrypt files and folders into a single password-protected .sbx file.",
     after_help = "Run without arguments to open the graphical interface.\n\n\
-        The password is read from (in order): --password-stdin, the VAULT_PASSWORD\n\
+        The password is read from (in order): --password-stdin, the SEALBOX_PASSWORD\n\
         environment variable, or an interactive prompt."
 )]
 pub struct Cli {
@@ -28,12 +28,13 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Encrypt files and folders into a new .vault file
-    Create {
-        /// Output vault file (".vault" is appended if missing)
+    /// Seal files and folders into a new encrypted .sbx file
+    #[command(visible_alias = "create")]
+    Seal {
+        /// Output sealbox file (".sbx" is appended if missing)
         #[arg(short, long)]
         output: PathBuf,
-        /// Files and folders to put in the vault
+        /// Files and folders to put in the sealbox
         #[arg(required = true)]
         inputs: Vec<PathBuf>,
         /// Overwrite the output file if it already exists
@@ -47,10 +48,11 @@ pub enum Cmd {
         #[arg(long)]
         password_stdin: bool,
     },
-    /// Decrypt a .vault file and restore its contents
-    Extract {
-        /// Vault file to extract
-        vault: PathBuf,
+    /// Decrypt a .sbx file and restore its contents
+    #[command(visible_alias = "extract")]
+    Unseal {
+        /// Sealbox file to unseal
+        sealbox: PathBuf,
         /// Destination folder (created if needed)
         #[arg(short, long, default_value = ".")]
         output: PathBuf,
@@ -61,18 +63,18 @@ pub enum Cmd {
         #[arg(long)]
         password_stdin: bool,
     },
-    /// Show what is inside a .vault file (requires the password)
+    /// Show what is inside a .sbx file (requires the password)
     List {
-        /// Vault file to inspect
-        vault: PathBuf,
+        /// Sealbox file to inspect
+        sealbox: PathBuf,
         /// Read the password from the first line of standard input
         #[arg(long)]
         password_stdin: bool,
     },
     /// Open the graphical interface
     Gui {
-        /// Vault file to open right away
-        vault: Option<PathBuf>,
+        /// Sealbox file to open right away
+        sealbox: Option<PathBuf>,
     },
 }
 
@@ -81,7 +83,7 @@ fn get_password(from_stdin: bool, confirm: bool) -> Result<Zeroizing<String>> {
         let mut line = Zeroizing::new(String::new());
         io::stdin().lock().read_line(&mut line)?;
         Zeroizing::new(line.trim_end_matches(['\r', '\n']).to_owned())
-    } else if let Ok(pw) = std::env::var("VAULT_PASSWORD") {
+    } else if let Ok(pw) = std::env::var("SEALBOX_PASSWORD") {
         Zeroizing::new(pw)
     } else {
         let pw = Zeroizing::new(rpassword::prompt_password("Password: ")?);
@@ -127,11 +129,11 @@ fn with_progress<T>(label: &str, job: impl FnOnce(&Progress) -> T) -> T {
 }
 
 /// ", 38% of original" style suffix, or nothing for empty input.
-pub fn ratio(original: u64, vault: u64) -> String {
+pub fn ratio(original: u64, sealbox: u64) -> String {
     if original == 0 {
         String::new()
     } else {
-        match vault as f64 * 100.0 / original as f64 {
+        match sealbox as f64 * 100.0 / original as f64 {
             p if p < 0.1 => ", <0.1% of original".to_string(),
             p if p < 10.0 => format!(", {p:.1}% of original"),
             p => format!(", {p:.0}% of original"),
@@ -153,7 +155,7 @@ fn print_summary(verb: &str, s: &Summary) {
 
 pub fn run(cmd: Cmd) -> Result<()> {
     match cmd {
-        Cmd::Create {
+        Cmd::Seal {
             mut output,
             inputs,
             force,
@@ -162,56 +164,56 @@ pub fn run(cmd: Cmd) -> Result<()> {
         } => {
             if output
                 .extension()
-                .is_none_or(|e| !e.eq_ignore_ascii_case("vault"))
+                .is_none_or(|e| !e.eq_ignore_ascii_case("sbx"))
             {
-                output.as_mut_os_string().push(".vault");
+                output.as_mut_os_string().push(".sbx");
             }
             let pw = get_password(password_stdin, true)?;
-            let s = with_progress("Encrypting", |p| {
-                archive::create_vault(
+            let s = with_progress("Sealing", |p| {
+                archive::seal(
                     &inputs,
                     &output,
                     pw.as_bytes(),
-                    &VaultParams::default(),
+                    &SealParams::default(),
                     level,
                     force,
                     p,
                 )
             })?;
-            print_summary("Encrypted", &s);
+            print_summary("Sealed", &s);
             println!(
-                "Vault written to {} ({}{})",
+                "Sealbox written to {} ({}{})",
                 output.display(),
-                human_size(s.vault_size),
-                ratio(s.bytes, s.vault_size)
+                human_size(s.sealbox_size),
+                ratio(s.bytes, s.sealbox_size)
             );
         }
-        Cmd::Extract {
-            vault,
+        Cmd::Unseal {
+            sealbox,
             output,
             overwrite,
             password_stdin,
         } => {
             let pw = get_password(password_stdin, false)?;
-            let s = with_progress("Decrypting", |p| {
-                archive::extract_vault(
-                    &vault,
+            let s = with_progress("Unsealing", |p| {
+                archive::unseal(
+                    &sealbox,
                     pw.as_bytes(),
-                    &VaultParams::default(),
+                    &SealParams::default(),
                     &output,
                     overwrite,
                     p,
                 )
             })?;
-            print_summary("Extracted", &s);
+            print_summary("Unsealed", &s);
             println!("Into {}", output.display());
         }
         Cmd::List {
-            vault,
+            sealbox,
             password_stdin,
         } => {
             let pw = get_password(password_stdin, false)?;
-            let entries = archive::list_vault(&vault, pw.as_bytes(), &VaultParams::default())?;
+            let entries = archive::list_contents(&sealbox, pw.as_bytes(), &SealParams::default())?;
             let (mut files, mut total) = (0, 0);
             for e in &entries {
                 match e.kind {
@@ -225,7 +227,7 @@ pub fn run(cmd: Cmd) -> Result<()> {
             }
             println!("{files} file(s), {} total", human_size(total));
         }
-        Cmd::Gui { vault } => crate::gui::run(vault)?,
+        Cmd::Gui { sealbox } => crate::gui::run(sealbox)?,
     }
     Ok(())
 }
