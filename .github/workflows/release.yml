@@ -69,7 +69,7 @@ jobs:
       - run: cargo test --release --locked --target ${{ matrix.target }}
         if: matrix.target != 'x86_64-apple-darwin'  # cross-compiled, cannot run on arm64
       - run: cargo build --release --locked --target ${{ matrix.target }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: third-party-licenses
       - name: Package
@@ -104,7 +104,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           pattern: pkg-*
