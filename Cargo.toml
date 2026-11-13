@@ -10,14 +10,18 @@ anyhow = "1"
 argon2 = "0.5"
 chacha20poly1305 = { version = "0.10", features = ["stream"] }
 clap = { version = "4", features = ["derive"] }
+ctrlc = "3"
 eframe = "0.31"
+fs2 = "0.4"
 rand = "0.8"
 rfd = "0.15"
 rpassword = "7"
 tempfile = "3"
+unicode-normalization = "0.1"
 walkdir = "2"
 zeroize = "1"
 zstd = { version = "0.13", features = ["zstdmt"] }
+zxcvbn = "3.1.1"
 
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
@@ -25,6 +29,10 @@ windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
 [[bin]]
 name = "sealbox"
 path = "src/main.rs"
+
+[[bin]]
+name = "sealbox-gui"
+path = "src/bin/sealbox-gui.rs"
 
 [profile.release]
 lto = true

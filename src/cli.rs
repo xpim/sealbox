@@ -10,7 +10,7 @@ use zeroize::Zeroizing;
 
 use crate::archive::{self, EntryKind, Progress, Summary};
 use crate::crypto::SealParams;
-use crate::{MIN_PASSWORD_LEN, human_size};
+use crate::{human_size, password_strength};
 
 #[derive(Parser)]
 #[command(
@@ -19,11 +19,16 @@ use crate::{MIN_PASSWORD_LEN, human_size};
     about = "Encrypt files and folders into a single password-protected .sbx file.",
     after_help = "Run without arguments to open the graphical interface.\n\n\
         The password is read from (in order): --password-stdin, the SEALBOX_PASSWORD\n\
-        environment variable, or an interactive prompt."
+        environment variable, or an interactive prompt.\n\n\
+        Press Ctrl+C to cancel a running job safely: nothing half-written is left behind."
 )]
 pub struct Cli {
     #[command(subcommand)]
     pub cmd: Option<Cmd>,
+}
+
+fn compression_level() -> clap::builder::RangedI64ValueParser<i32> {
+    clap::value_parser!(i32).range(1..=19)
 }
 
 #[derive(Subcommand)]
@@ -42,23 +47,40 @@ pub enum Cmd {
         force: bool,
         /// Compression level: 1 (fastest) to 19 (smallest)
         #[arg(short, long, default_value_t = archive::DEFAULT_COMPRESSION_LEVEL,
-              value_parser = clap::value_parser!(i32).range(1..=19))]
+              value_parser = compression_level())]
         level: i32,
         /// Read the password from the first line of standard input
         #[arg(long)]
         password_stdin: bool,
     },
-    /// Decrypt a .sbx file and restore its contents
+    /// Decrypt a .sbx file and restore all or some of its contents
     #[command(visible_alias = "extract")]
     Unseal {
         /// Sealbox file to unseal
         sealbox: PathBuf,
+        /// Only unseal these paths (files or folders, as shown by `list`)
+        paths: Vec<String>,
         /// Destination folder (created if needed)
         #[arg(short, long, default_value = ".")]
         output: PathBuf,
         /// Replace files that already exist in the destination
         #[arg(long)]
         overwrite: bool,
+        /// Read the password from the first line of standard input
+        #[arg(long)]
+        password_stdin: bool,
+    },
+    /// Add files and folders to an existing .sbx file (same password)
+    Add {
+        /// Sealbox file to add to
+        sealbox: PathBuf,
+        /// Files and folders to add
+        #[arg(required = true)]
+        inputs: Vec<PathBuf>,
+        /// Compression level: 1 (fastest) to 19 (smallest)
+        #[arg(short, long, default_value_t = archive::DEFAULT_COMPRESSION_LEVEL,
+              value_parser = compression_level())]
+        level: i32,
         /// Read the password from the first line of standard input
         #[arg(long)]
         password_stdin: bool,
@@ -71,6 +93,14 @@ pub enum Cmd {
         #[arg(long)]
         password_stdin: bool,
     },
+    /// Check that a .sbx file is complete and untampered, without unsealing it
+    Verify {
+        /// Sealbox file to check
+        sealbox: PathBuf,
+        /// Read the password from the first line of standard input
+        #[arg(long)]
+        password_stdin: bool,
+    },
     /// Open the graphical interface
     Gui {
         /// Sealbox file to open right away
@@ -78,35 +108,51 @@ pub enum Cmd {
     },
 }
 
-fn get_password(from_stdin: bool, confirm: bool) -> Result<Zeroizing<String>> {
+/// Get the password. For a new sealbox (`new = true`) an interactive prompt
+/// asks twice, and the password must pass the strength policy.
+fn get_password(from_stdin: bool, new: bool) -> Result<Zeroizing<String>> {
+    let interactive = !from_stdin && std::env::var_os("SEALBOX_PASSWORD").is_none();
     let pw = if from_stdin {
         let mut line = Zeroizing::new(String::new());
         io::stdin().lock().read_line(&mut line)?;
         Zeroizing::new(line.trim_end_matches(['\r', '\n']).to_owned())
-    } else if let Ok(pw) = std::env::var("SEALBOX_PASSWORD") {
-        Zeroizing::new(pw)
+    } else if !interactive {
+        Zeroizing::new(std::env::var("SEALBOX_PASSWORD")?)
     } else {
-        let pw = Zeroizing::new(rpassword::prompt_password("Password: ")?);
-        if confirm {
+        Zeroizing::new(rpassword::prompt_password("Password: ")?)
+    };
+    if pw.is_empty() {
+        bail!("password must not be empty");
+    }
+    if new {
+        // Check strength before asking for confirmation, so a weak password
+        // is not typed twice for nothing.
+        let strength = password_strength(&pw);
+        if !strength.acceptable {
+            bail!("password rejected. {}", strength.message);
+        }
+        if interactive {
             let again = Zeroizing::new(rpassword::prompt_password("Confirm password: ")?);
             if *pw != *again {
                 bail!("passwords do not match");
             }
         }
-        pw
-    };
-    if pw.is_empty() {
-        bail!("password must not be empty");
-    }
-    if confirm && pw.chars().count() < MIN_PASSWORD_LEN {
-        bail!("password must be at least {MIN_PASSWORD_LEN} characters");
     }
     Ok(pw)
 }
 
 /// Run `job` while drawing a progress line on stderr (when it is a terminal).
+/// Ctrl+C cancels the job cleanly instead of killing the process mid-write.
 fn with_progress<T>(label: &str, job: impl FnOnce(&Progress) -> T) -> T {
     let progress = Progress::default();
+    let cancel = progress.cancel.clone();
+    let _ = ctrlc::set_handler(move || {
+        if cancel.swap(true, Ordering::Relaxed) {
+            // Second Ctrl+C: the user really wants out.
+            std::process::exit(130);
+        }
+        eprintln!("\nCancelling… (press Ctrl+C again to force quit)");
+    });
     let finished = Arc::new(AtomicBool::new(false));
     let show = io::stderr().is_terminal();
     let printer = show.then(|| {
@@ -128,19 +174,6 @@ fn with_progress<T>(label: &str, job: impl FnOnce(&Progress) -> T) -> T {
     out
 }
 
-/// ", 38% of original" style suffix, or nothing for empty input.
-pub fn ratio(original: u64, sealbox: u64) -> String {
-    if original == 0 {
-        String::new()
-    } else {
-        match sealbox as f64 * 100.0 / original as f64 {
-            p if p < 0.1 => ", <0.1% of original".to_string(),
-            p if p < 10.0 => format!(", {p:.1}% of original"),
-            p => format!(", {p:.0}% of original"),
-        }
-    }
-}
-
 fn print_summary(verb: &str, s: &Summary) {
     for w in &s.warnings {
         eprintln!("warning: {w}");
@@ -153,7 +186,21 @@ fn print_summary(verb: &str, s: &Summary) {
     );
 }
 
+/// ", 38% of original" style suffix, or nothing for empty input.
+pub fn ratio(original: u64, sealed: u64) -> String {
+    if original == 0 {
+        String::new()
+    } else {
+        match sealed as f64 * 100.0 / original as f64 {
+            p if p < 0.1 => ", <0.1% of original".to_string(),
+            p if p < 10.0 => format!(", {p:.1}% of original"),
+            p => format!(", {p:.0}% of original"),
+        }
+    }
+}
+
 pub fn run(cmd: Cmd) -> Result<()> {
+    let params = SealParams::default();
     match cmd {
         Cmd::Seal {
             mut output,
@@ -170,15 +217,7 @@ pub fn run(cmd: Cmd) -> Result<()> {
             }
             let pw = get_password(password_stdin, true)?;
             let s = with_progress("Sealing", |p| {
-                archive::seal(
-                    &inputs,
-                    &output,
-                    pw.as_bytes(),
-                    &SealParams::default(),
-                    level,
-                    force,
-                    p,
-                )
+                archive::seal(&inputs, &output, pw.as_bytes(), &params, level, force, p)
             })?;
             print_summary("Sealed", &s);
             println!(
@@ -190,6 +229,7 @@ pub fn run(cmd: Cmd) -> Result<()> {
         }
         Cmd::Unseal {
             sealbox,
+            paths,
             output,
             overwrite,
             password_stdin,
@@ -199,21 +239,39 @@ pub fn run(cmd: Cmd) -> Result<()> {
                 archive::unseal(
                     &sealbox,
                     pw.as_bytes(),
-                    &SealParams::default(),
+                    &params,
                     &output,
                     overwrite,
+                    &paths,
                     p,
                 )
             })?;
             print_summary("Unsealed", &s);
             println!("Into {}", output.display());
         }
+        Cmd::Add {
+            sealbox,
+            inputs,
+            level,
+            password_stdin,
+        } => {
+            let pw = get_password(password_stdin, false)?;
+            let s = with_progress("Adding", |p| {
+                archive::add(&sealbox, &inputs, pw.as_bytes(), &params, level, p)
+            })?;
+            print_summary("Added", &s);
+            println!(
+                "{} is now {}",
+                sealbox.display(),
+                human_size(s.sealbox_size)
+            );
+        }
         Cmd::List {
             sealbox,
             password_stdin,
         } => {
             let pw = get_password(password_stdin, false)?;
-            let entries = archive::list_contents(&sealbox, pw.as_bytes(), &SealParams::default())?;
+            let entries = archive::list_contents(&sealbox, pw.as_bytes(), &params)?;
             let (mut files, mut total) = (0, 0);
             for e in &entries {
                 match e.kind {
@@ -225,7 +283,23 @@ pub fn run(cmd: Cmd) -> Result<()> {
                     }
                 }
             }
-            println!("{files} file(s), {} total", human_size(total));
+            println!("{files} file(s), {} total when unsealed", human_size(total));
+        }
+        Cmd::Verify {
+            sealbox,
+            password_stdin,
+        } => {
+            let pw = get_password(password_stdin, false)?;
+            let s = with_progress("Verifying", |p| {
+                archive::verify(&sealbox, pw.as_bytes(), &params, p)
+            })?;
+            println!(
+                "OK: {} is intact ({} file(s), {} folder(s), {}).",
+                sealbox.display(),
+                s.files,
+                s.dirs,
+                human_size(s.bytes)
+            );
         }
         Cmd::Gui { sealbox } => crate::gui::run(sealbox)?,
     }

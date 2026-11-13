@@ -86,13 +86,29 @@ fn header_bytes(salt: &[u8; SALT_LEN], nonce: &[u8; NONCE_LEN]) -> [u8; HEADER_L
     b
 }
 
+/// Bring a password into Unicode NFC form. The same visible text (e.g. "é")
+/// can be typed or pasted as different byte sequences depending on the OS
+/// and input method; normalising makes the password work everywhere.
+fn normalize_password(password: &[u8]) -> Zeroizing<Vec<u8>> {
+    use unicode_normalization::UnicodeNormalization;
+    match std::str::from_utf8(password) {
+        Ok(s) => Zeroizing::new(
+            Zeroizing::new(s.nfc().collect::<String>())
+                .as_bytes()
+                .to_vec(),
+        ),
+        Err(_) => Zeroizing::new(password.to_vec()),
+    }
+}
+
 fn derive_key(password: &[u8], salt: &[u8], kdf: KdfParams) -> Result<Zeroizing<[u8; 32]>> {
+    let password = normalize_password(password);
     let params = Params::new(kdf.m_cost_kib, kdf.t_cost, kdf.p_cost, Some(32))
         .map_err(|e| anyhow::anyhow!("invalid KDF parameters: {e}"))?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = Zeroizing::new([0u8; 32]);
     argon
-        .hash_password_into(password, salt, key.as_mut())
+        .hash_password_into(&password, salt, key.as_mut())
         .map_err(|e| anyhow::anyhow!("key derivation failed: {e}"))?;
     Ok(key)
 }
@@ -388,6 +404,18 @@ mod tests {
         let (a, b) = (roundtrip(b"hello"), roundtrip(b"hello"));
         let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
         assert!(common < 4, "{common} identical leading bytes");
+    }
+
+    #[test]
+    fn unicode_password_forms_are_equivalent() {
+        // "café" with a precomposed é (NFC) vs e + combining accent (NFD).
+        let nfc = "caf\u{e9}".as_bytes();
+        let nfd = "cafe\u{301}".as_bytes();
+        assert_ne!(nfc, nfd);
+        let mut w = EncryptWriter::new(Vec::new(), nfd, &FAST).unwrap();
+        w.write_all(b"data").unwrap();
+        let ct = w.finish().unwrap();
+        assert_eq!(decrypt(&ct, nfc).unwrap(), b"data");
     }
 
     #[test]

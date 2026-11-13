@@ -12,13 +12,13 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact: sealbox-linux-x86_64
-            bin: sealbox
+            ext: ""
           - os: windows-latest
             artifact: sealbox-windows-x86_64
-            bin: sealbox.exe
+            ext: ".exe"
           - os: macos-latest
             artifact: sealbox-macos-arm64
-            bin: sealbox
+            ext: ""
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -28,4 +28,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: target/release/${{ matrix.bin }}
+          path: |
+            target/release/sealbox${{ matrix.ext }}
+            target/release/sealbox-gui${{ matrix.ext }}
