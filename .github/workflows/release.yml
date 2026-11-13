@@ -21,7 +21,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Tag must match Cargo.toml version
         id: version
         run: |
@@ -40,7 +40,7 @@ jobs:
         with:
           tool: cargo-about
       - run: cargo about generate about.hbs -o THIRD_PARTY_LICENSES.html
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: third-party-licenses
           path: THIRD_PARTY_LICENSES.html
@@ -62,7 +62,7 @@ jobs:
       id-token: write      # for build provenance attestations
       attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -88,10 +88,10 @@ jobs:
           fi
           echo "file=$name.${{ matrix.archive }}" >> "$GITHUB_OUTPUT"
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: ${{ steps.package.outputs.file }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: pkg-${{ matrix.target }}
           path: ${{ steps.package.outputs.file }}
@@ -103,8 +103,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
+
         with:
           path: dist
           pattern: pkg-*
