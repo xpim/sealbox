@@ -10,7 +10,7 @@ use anyhow::{Result, anyhow};
 use eframe::egui::{self, Color32, RichText};
 use zeroize::Zeroizing;
 
-use crate::archive::{self, Entry, EntryKind, Progress, Summary};
+use crate::archive::{self, Contents, Entry, EntryKind, Progress, SealboxInfo, Summary};
 use crate::crypto::SealParams;
 use crate::{Strength, human_size, password_strength};
 
@@ -46,16 +46,19 @@ struct ContainerItem {
 
 struct OpenedBox {
     path: PathBuf,
+    info: SealboxInfo,
     entries: Vec<Entry>,
     selected: Vec<bool>,
     password: Zeroizing<String>,
 }
 
 impl OpenedBox {
-    fn new(path: PathBuf, entries: Vec<Entry>, password: Zeroizing<String>) -> Self {
+    fn new(path: PathBuf, contents: Contents, password: Zeroizing<String>) -> Self {
+        let Contents { info, entries } = contents;
         let selected = vec![false; entries.len()];
         Self {
             path,
+            info,
             entries,
             selected,
             password,
@@ -117,10 +120,10 @@ struct UnlockPrompt {
 
 enum JobDone {
     Sealed(Result<Summary>, PathBuf),
-    Opened(Result<Vec<Entry>>, PathBuf, Zeroizing<String>),
+    Opened(Result<Contents>, PathBuf, Zeroizing<String>),
     Unsealed(Result<Summary>, PathBuf),
     Verified(Result<Summary>),
-    Added(Result<(Summary, Vec<Entry>)>),
+    Added(Result<(Summary, Contents)>),
 }
 
 struct Job {
@@ -398,9 +401,9 @@ impl App {
                 self.confirm = Zeroizing::new(String::new());
                 self.status = Some(Status::Info(msg));
             }
-            JobDone::Opened(Ok(entries), path, password) => {
+            JobDone::Opened(Ok(contents), path, password) => {
                 self.unlock = None;
-                self.opened = Some(OpenedBox::new(path, entries, password));
+                self.opened = Some(OpenedBox::new(path, contents, password));
             }
             JobDone::Opened(Err(e), path, _) => {
                 self.unlock = Some(UnlockPrompt {
@@ -425,10 +428,13 @@ impl App {
                     human_size(s.bytes)
                 )));
             }
-            JobDone::Added(Ok((s, entries))) => {
+            JobDone::Added(Ok((s, contents))) => {
                 if let Some(v) = &mut self.opened {
-                    v.selected = vec![false; entries.len()];
-                    v.entries = entries;
+                    v.selected = vec![false; contents.entries.len()];
+                    v.entries = contents.entries;
+                    // The sealbox was rewritten, so it now carries this
+                    // build's version.
+                    v.info = contents.info;
                 }
                 self.status = Some(Status::Info(format!(
                     "Added {} file(s), {}; sealbox is now {}",
@@ -699,6 +705,13 @@ impl App {
                     ))
                     .strong(),
                 );
+                ui.label(
+                    RichText::new(format!("· created with Sealbox {}", v.info.created_with)).weak(),
+                )
+                .on_hover_text(format!(
+                    "Format {} (readable by Sealbox {} and newer)",
+                    v.info.format, v.info.min_app
+                ));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("Select none").clicked() {
                         v.selected.iter_mut().for_each(|s| *s = false);

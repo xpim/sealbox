@@ -288,9 +288,9 @@ pub fn run(cmd: Cmd) -> Result<()> {
             password_stdin,
         } => {
             let pw = get_password(password_stdin, false)?;
-            let entries = archive::list_contents(&sealbox, pw.as_bytes(), &params)?;
+            let contents = archive::list_contents(&sealbox, pw.as_bytes(), &params)?;
             let (mut files, mut total) = (0, 0);
-            for e in &entries {
+            for e in &contents.entries {
                 match e.kind {
                     EntryKind::Dir => println!("{:>10}  {}/", "", e.path),
                     EntryKind::File => {
@@ -301,6 +301,10 @@ pub fn run(cmd: Cmd) -> Result<()> {
                 }
             }
             println!("{files} file(s), {} total when unsealed", human_size(total));
+            println!(
+                "Created with Sealbox {} (format {}, readable by Sealbox {} and newer)",
+                contents.info.created_with, contents.info.format, contents.info.min_app
+            );
         }
         Cmd::Verify {
             sealbox,

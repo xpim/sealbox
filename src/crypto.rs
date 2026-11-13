@@ -12,10 +12,14 @@
 //! There is deliberately no magic number, version field or parameter block.
 //! Every byte of a sealbox is either random (salt, nonce) or ciphertext, so the
 //! file looks like uniformly random data and does not identify the program
-//! that wrote it. The cost of this is that the format parameters
-//! ([`SealParams::default`]) are fixed constants of format v1. A future
-//! format would be recognised by trial decryption (try each known parameter
-//! set until the first chunk authenticates), not by a header field.
+//! that wrote it. The cost of this is that the parameters of this outer
+//! layer ([`SealParams::default`]) are not stored in the file.
+//!
+//! **Compatibility rule:** keep this outer layer stable. Put format changes
+//! inside the encrypted payload, whose version header lets any Sealbox name
+//! the version needed (see `archive.rs`). If the outer layer ever must
+//! change, new versions must also try the old parameters (trial decryption)
+//! so existing sealboxes keep opening.
 //!
 //! The key is derived from the password with Argon2id. The payload is
 //! encrypted with XChaCha20-Poly1305 in the STREAM construction (Hoang,
@@ -237,8 +241,12 @@ pub struct DecryptReader<R: Read> {
 
 /// Error message for authentication failures. A wrong password and a
 /// tampered file look identical by design.
-pub const AUTH_FAILED: &str =
-    "wrong password, or the sealbox file is corrupted or has been tampered with";
+///
+/// A sealbox written by a future version with different outer-layer
+/// parameters also fails here; without a plaintext header (which would
+/// identify the file) it cannot be told apart, so the message says so.
+pub const AUTH_FAILED: &str = "cannot open the sealbox: wrong password, the file is damaged or \
+     was tampered with, or it was made by a newer version of Sealbox";
 
 impl<R: Read> DecryptReader<R> {
     pub fn new(mut inner: R, password: &[u8], params: &SealParams) -> Result<Self> {

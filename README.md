@@ -114,15 +114,32 @@ existing sealbox before replacing it.
 salt[32] | nonce_prefix[19] | STREAM ciphertext chunks...
 ```
 
-There is no header beyond the random salt and nonce. The format parameters
-(Argon2id 256 MiB / 3 passes / 4 lanes, 1 MiB chunks) are fixed constants of
-v1, not stored in the file. A future format version would be detected by trial
-decryption rather than by a version field.
+On disk there is nothing beyond the random salt and nonce. The parameters of
+this outer layer (Argon2id 256 MiB / 3 passes / 4 lanes, 1 MiB chunks) are
+fixed, not stored in the file.
 
-The decrypted payload is a one-byte payload format marker (`1` = zstd), a zstd
-frame holding the index (paths, sizes, mtimes, permissions) followed by the
-file data, and then padding. The marker is encrypted, so it is invisible on
-disk. See `src/crypto.rs` and `src/archive.rs`.
+The decrypted payload starts with a **version header**: the payload format,
+the oldest format a reader must understand, the Sealbox version that created
+the sealbox and the first Sealbox version able to read it. It is encrypted, so
+it is invisible on disk. Then follows a zstd frame holding the index (paths,
+sizes, mtimes, permissions) and the file data, and finally padding. See
+`src/crypto.rs` and `src/archive.rs`.
+
+### Versions and compatibility
+
+`sealbox list` (and the GUI) shows which Sealbox version created a sealbox.
+
+* **Newer sealbox, older Sealbox:** if a future format change is something an
+  older Sealbox cannot handle, it says exactly which version is needed, e.g.
+  *"this sealbox was created with Sealbox 2.3.0 and needs Sealbox 2.0.0 or
+  newer to open it (this is Sealbox 1.4.0)"*. Changes that older versions can
+  still read (new header fields) keep working with them.
+* **The one exception:** the version header is inside the encryption, so a
+  future change to the *outer* layer cannot be reported this way: an old
+  Sealbox cannot decrypt the file far enough to read it. The error then lists
+  "made by a newer version of Sealbox" as one of the possible causes, next to
+  a wrong password or damage. To avoid this, the outer layer is kept stable.
+  If it ever has to change, newer versions will keep opening older sealboxes.
 
 ## Tests
 

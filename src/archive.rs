@@ -3,8 +3,14 @@
 //! The plaintext that goes through [`crate::crypto`] looks like this:
 //!
 //! ```text
-//! u8 payload format (1 = zstd-compressed archive)
-//! zstd frame containing:
+//! version header (stable forever, see below):
+//!   u32 header length N, then N bytes:
+//!     u16 format          payload format this sealbox was written in (1)
+//!     u16 min format      oldest reader format that can read it (1)
+//!     u8 len + UTF-8      Sealbox version that created it, e.g. "0.1.0"
+//!     u8 len + UTF-8      first Sealbox version that can read it
+//!     ...                 future fields; readers ignore what they don't know
+//! format 1 body: zstd frame containing:
 //!   "TVIDX001"                     index magic
 //!   u64 entry count
 //!   per entry:
@@ -25,6 +31,12 @@
 //!
 //! The index comes first, so listing a sealbox only has to decrypt and
 //! decompress the start of it.
+//!
+//! **Compatibility rule:** the version header must keep this layout in every
+//! future version, so that any Sealbox can always read it and, for a sealbox
+//! it cannot handle, name the version that is needed. New header fields may
+//! only be appended. A change that old readers can still handle keeps
+//! `min format`; a breaking change raises it and updates [`MIN_READER_APP`].
 //!
 //! Unsealing is *staged*: every file is first written under a temporary name
 //! next to its destination, and only renamed into place once the whole
@@ -55,7 +67,16 @@ const MAX_PATH_LEN: u32 = 32 * 1024;
 /// (roughly 100 bytes per entry plus the path bytes).
 const MAX_ENTRIES: u64 = 5_000_000;
 const MAX_INDEX_PATH_BYTES: u64 = 256 * 1024 * 1024;
-const PAYLOAD_ZSTD: u8 = 1;
+/// Payload format written by this build, and the newest one it can read.
+pub const FORMAT: u16 = 1;
+/// Oldest reader format that can read what this build writes. Raise it (and
+/// [`MIN_READER_APP`]) only for changes that old readers cannot handle.
+const MIN_READER_FORMAT: u16 = 1;
+/// First Sealbox release able to read what this build writes.
+const MIN_READER_APP: &str = "0.1.0";
+/// Version of this build, recorded in every sealbox it writes.
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const MAX_HEADER_LEN: u32 = 64 * 1024;
 /// zstd level used when none is given (1 = fastest, 19 = smallest).
 pub const DEFAULT_COMPRESSION_LEVEL: i32 = 3;
 
@@ -105,6 +126,23 @@ impl Progress {
         self.total.store(total, Ordering::Relaxed);
         self.done.store(0, Ordering::Relaxed);
     }
+}
+
+/// What the version header of a sealbox says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SealboxInfo {
+    pub format: u16,
+    pub min_format: u16,
+    /// Sealbox version that created the sealbox.
+    pub created_with: String,
+    /// First Sealbox version that can read it.
+    pub min_app: String,
+}
+
+/// Result of [`list_contents`].
+pub struct Contents {
+    pub info: SealboxInfo,
+    pub entries: Vec<Entry>,
 }
 
 #[derive(Debug, Default)]
@@ -394,7 +432,12 @@ fn write_sealbox(
         .with_context(|| format!("cannot write in {}", dir.display()))?;
     let file = tmp.as_file().try_clone()?;
     let mut w = EncryptWriter::new(BufWriter::new(file), password, params)?;
-    w.write_all(&[PAYLOAD_ZSTD])?;
+    w.write_all(&encode_header(
+        FORMAT,
+        MIN_READER_FORMAT,
+        APP_VERSION,
+        MIN_READER_APP,
+    ))?;
     let mut w = zstd::Encoder::new(w, compression_level)?;
     // The AEAD already authenticates every byte; a zstd checksum adds nothing.
     w.include_checksum(false)?;
@@ -504,7 +547,7 @@ pub fn add(
     compression_level: i32,
     progress: &Progress,
 ) -> Result<Summary> {
-    let mut existing = open_sealbox(sealbox, password, params)?;
+    let (_, mut existing) = open_sealbox(sealbox, password, params)?;
     let old = read_index(&mut existing)?;
     let mut warnings = Vec::new();
     let exclude = fs::canonicalize(sealbox).ok();
@@ -619,15 +662,79 @@ fn read_index<R: Read>(r: &mut R) -> Result<Vec<Entry>> {
 type Decrypted = BufReader<DecryptReader<BufReader<File>>>;
 type Payload = zstd::stream::read::Decoder<'static, Decrypted>;
 
-/// Decrypt the sealbox and return a reader over the decompressed archive.
-fn open_sealbox(sealbox: &Path, password: &[u8], params: &SealParams) -> Result<Payload> {
+fn put_str(b: &mut Vec<u8>, s: &str) {
+    let s = &s.as_bytes()[..s.len().min(255)];
+    b.push(s.len() as u8);
+    b.extend_from_slice(s);
+}
+
+fn encode_header(format: u16, min_format: u16, created_with: &str, min_app: &str) -> Vec<u8> {
+    let mut fields = Vec::new();
+    fields.extend_from_slice(&format.to_le_bytes());
+    fields.extend_from_slice(&min_format.to_le_bytes());
+    put_str(&mut fields, created_with);
+    put_str(&mut fields, min_app);
+    let mut b = (fields.len() as u32).to_le_bytes().to_vec();
+    b.extend_from_slice(&fields);
+    b
+}
+
+/// Read the version header and refuse sealboxes this build cannot read,
+/// naming the Sealbox version that is needed.
+fn read_header<R: Read>(r: &mut R) -> Result<SealboxInfo> {
+    let bad = || anyhow!("sealbox contents are malformed (bad version header)");
+    let len = read_u32(r)?;
+    if !(4..=MAX_HEADER_LEN).contains(&len) {
+        return Err(bad());
+    }
+    let mut h = vec![0u8; len as usize];
+    r.read_exact(&mut h)?;
+    let format = u16::from_le_bytes([h[0], h[1]]);
+    let min_format = u16::from_le_bytes([h[2], h[3]]);
+    // Version strings are informational: tolerate them being absent or odd,
+    // and keep them printable.
+    let mut rest = &h[4..];
+    let mut take_str = || -> String {
+        let Some((&n, tail)) = rest.split_first() else {
+            return "unknown".into();
+        };
+        let n = (n as usize).min(tail.len());
+        let s: String = String::from_utf8_lossy(&tail[..n])
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(64)
+            .collect();
+        rest = &tail[n..];
+        if s.is_empty() { "unknown".into() } else { s }
+    };
+    let created_with = take_str();
+    let min_app = take_str();
+    if min_format > FORMAT || min_format > format {
+        bail!(
+            "this sealbox was created with Sealbox {created_with} and needs Sealbox \
+             {min_app} or newer to open it (this is Sealbox {APP_VERSION})"
+        );
+    }
+    Ok(SealboxInfo {
+        format,
+        min_format,
+        created_with,
+        min_app,
+    })
+}
+
+/// Decrypt the sealbox, check its version header and return a reader over
+/// the decompressed archive.
+fn open_sealbox(
+    sealbox: &Path,
+    password: &[u8],
+    params: &SealParams,
+) -> Result<(SealboxInfo, Payload)> {
     let f = File::open(sealbox).with_context(|| format!("cannot open {}", sealbox.display()))?;
     let mut r = DecryptReader::new(BufReader::new(f), password, params)?;
-    if read_u8(&mut r)? != PAYLOAD_ZSTD {
-        bail!("sealbox contents use an unsupported format (made by a newer version?)");
-    }
+    let info = read_header(&mut r)?;
     let z = zstd::stream::read::Decoder::with_buffer(BufReader::new(r))?.single_frame();
-    Ok(z)
+    Ok((info, z))
 }
 
 /// Verify that the archive ended exactly where the index said it would,
@@ -650,10 +757,13 @@ fn skip_file(r: &mut Payload, size: u64, progress: &Progress) -> Result<()> {
     Ok(())
 }
 
-/// Decrypt only the index of a sealbox and return its entries.
-pub fn list_contents(sealbox: &Path, password: &[u8], params: &SealParams) -> Result<Vec<Entry>> {
-    let mut r = open_sealbox(sealbox, password, params)?;
-    read_index(&mut r)
+/// Decrypt only the version header and index of a sealbox.
+pub fn list_contents(sealbox: &Path, password: &[u8], params: &SealParams) -> Result<Contents> {
+    let (info, mut r) = open_sealbox(sealbox, password, params)?;
+    Ok(Contents {
+        info,
+        entries: read_index(&mut r)?,
+    })
 }
 
 /// Decrypt and authenticate the whole sealbox without writing anything.
@@ -663,7 +773,7 @@ pub fn verify(
     params: &SealParams,
     progress: &Progress,
 ) -> Result<Summary> {
-    let mut r = open_sealbox(sealbox, password, params)?;
+    let (_, mut r) = open_sealbox(sealbox, password, params)?;
     let entries = read_index(&mut r)?;
     progress.reset(entries.iter().map(|e| e.size).sum());
     let mut summary = Summary::default();
@@ -806,7 +916,7 @@ pub fn unseal(
     only: &[String],
     progress: &Progress,
 ) -> Result<Summary> {
-    let mut r = open_sealbox(sealbox, password, params)?;
+    let (_, mut r) = open_sealbox(sealbox, password, params)?;
     let entries = read_index(&mut r)?;
 
     // --- Checks before touching the disk -------------------------------
@@ -991,7 +1101,13 @@ mod tests {
             .collect();
         let f = File::create(path).unwrap();
         let mut w = EncryptWriter::new(f, PW, &FAST).unwrap();
-        w.write_all(&[PAYLOAD_ZSTD]).unwrap();
+        w.write_all(&encode_header(
+            FORMAT,
+            MIN_READER_FORMAT,
+            APP_VERSION,
+            MIN_READER_APP,
+        ))
+        .unwrap();
         let mut z = zstd::Encoder::new(w, 3).unwrap();
         z.write_all(&encode_index(es.iter())).unwrap();
         for (_, _, d) in entries {
@@ -1023,6 +1139,48 @@ mod tests {
         let out = tmp.path().join("out");
         unseal(&sb, PW, &FAST, &out, false, &[], &p()).unwrap();
         assert_eq!(fs::read_to_string(out.join("log.txt")).unwrap(), text);
+    }
+
+    /// Write a sealbox whose version header claims `header`, followed by a
+    /// valid format-1 body.
+    fn with_header(path: &Path, header: &[u8]) {
+        let f = File::create(path).unwrap();
+        let mut w = EncryptWriter::new(f, PW, &FAST).unwrap();
+        w.write_all(header).unwrap();
+        let mut z = zstd::Encoder::new(w, 3).unwrap();
+        z.write_all(&encode_index(std::iter::empty())).unwrap();
+        z.finish().unwrap().finish().unwrap();
+    }
+
+    #[test]
+    fn newer_sealbox_names_required_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sb = tmp.path().join("future.sbx");
+        with_header(&sb, &encode_header(7, 5, "9.2.0", "9.0.0"));
+        let err = format!("{:#}", list_contents(&sb, PW, &FAST).err().unwrap());
+        assert!(err.contains("created with Sealbox 9.2.0"), "{err}");
+        assert!(err.contains("needs Sealbox 9.0.0 or newer"), "{err}");
+        assert!(err.contains(APP_VERSION), "{err}");
+        let out = tmp.path().join("out");
+        assert!(unseal(&sb, PW, &FAST, &out, false, &[], &p()).is_err());
+    }
+
+    #[test]
+    fn newer_but_compatible_sealbox_opens() {
+        // A future writer that only appended header fields and kept
+        // min format 1 must still be readable.
+        let tmp = tempfile::tempdir().unwrap();
+        let sb = tmp.path().join("compat.sbx");
+        let mut h = encode_header(3, 1, "4.1.0", "0.1.0");
+        let extra = b"future field";
+        let len = u32::from_le_bytes(h[..4].try_into().unwrap()) + extra.len() as u32;
+        h[..4].copy_from_slice(&len.to_le_bytes());
+        h.extend_from_slice(extra);
+        with_header(&sb, &h);
+        let c = list_contents(&sb, PW, &FAST).unwrap();
+        assert_eq!(c.info.created_with, "4.1.0");
+        assert!(c.entries.is_empty());
+        assert!(verify(&sb, PW, &FAST, &p()).is_ok());
     }
 
     #[test]
@@ -1107,11 +1265,10 @@ mod tests {
         assert!(!raw.windows(5).any(|w| w == b"a.txt"), "file name leaked");
         assert!(!raw.windows(5).any(|w| w == b"hello"), "content leaked");
 
-        let names: Vec<String> = list_contents(&sb, PW, &FAST)
-            .unwrap()
-            .into_iter()
-            .map(|e| e.path)
-            .collect();
+        let contents = list_contents(&sb, PW, &FAST).unwrap();
+        assert_eq!(contents.info.created_with, APP_VERSION);
+        assert_eq!(contents.info.format, FORMAT);
+        let names: Vec<String> = contents.entries.into_iter().map(|e| e.path).collect();
         assert!(names.contains(&"src/docs/empty".to_string()));
         assert!(names.contains(&"note.md".to_string()));
         assert!(list_contents(&sb, b"wrong", &FAST).is_err());
