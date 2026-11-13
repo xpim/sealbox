@@ -1,0 +1,33 @@
+[package]
+name = "the_vault"
+version = "0.1.0"
+edition = "2024"
+description = "Encrypt files and folders into a password-protected .vault file (GUI + CLI)"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+argon2 = "0.5"
+chacha20poly1305 = { version = "0.10", features = ["stream"] }
+clap = { version = "4", features = ["derive"] }
+eframe = "0.31"
+rand = "0.8"
+rfd = "0.15"
+rpassword = "7"
+tempfile = "3"
+walkdir = "2"
+zeroize = "1"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+
+[[bin]]
+name = "vault"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+
