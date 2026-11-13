@@ -12,15 +12,32 @@ use crate::archive::{self, EntryKind, Progress, Summary};
 use crate::crypto::SealParams;
 use crate::{human_size, password_strength};
 
+const AFTER_HELP: &str = "\
+Examples:
+  sealbox seal -o backup.sbx ~/Documents notes.txt     Seal files/folders (asks password twice)
+  sealbox seal -l 19 -f -o backup.sbx ~/Documents      Max compression (-l 1-19), overwrite (-f)
+  sealbox list backup.sbx                              Show contents and sizes
+  sealbox unseal backup.sbx -o ./restored              Unseal everything into ./restored
+  sealbox unseal backup.sbx Documents/taxes            Unseal only some paths
+  sealbox unseal backup.sbx --overwrite                Replace existing files
+  sealbox add backup.sbx receipts/                     Add to an existing sealbox
+  sealbox verify backup.sbx                            Check integrity, write nothing
+  sealbox gui backup.sbx                               Open a sealbox in the GUI
+
+Password:
+  Read from (in order) --password-stdin, the SEALBOX_PASSWORD environment
+  variable, or an interactive prompt. New sealboxes need a strong password.
+
+Run without arguments to open the graphical interface.
+Run 'sealbox <COMMAND> --help' for all options of a command.
+Press Ctrl+C to cancel a running job safely: nothing half-written is left behind.";
+
 #[derive(Parser)]
 #[command(
     name = "sealbox",
     version,
     about = "Encrypt files and folders into a single password-protected .sbx file.",
-    after_help = "Run without arguments to open the graphical interface.\n\n\
-        The password is read from (in order): --password-stdin, the SEALBOX_PASSWORD\n\
-        environment variable, or an interactive prompt.\n\n\
-        Press Ctrl+C to cancel a running job safely: nothing half-written is left behind."
+    after_help = AFTER_HELP
 )]
 pub struct Cli {
     #[command(subcommand)]
