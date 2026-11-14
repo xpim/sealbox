@@ -6,7 +6,7 @@ All notable changes to Sealbox are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-11-14
 
 First public release.
 
